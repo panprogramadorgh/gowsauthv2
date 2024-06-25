@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Websocket Server</title>
+</head>
+
+<body>
+  <h1>Websocket Server</h1>
+  <div>
+    <div class="form">
+      <input type="text" id="msg" autofocus placeholder="Enter message (/ for commands)" />
+      <button id="send-msg">Send</button>
+    </div>
+    <div>
+      <pre id="output"></pre>
+    </div>
+  </div>
+</body>
+
+<script>
+  const msg = document.getElementById("msg");
+  const sendMsg = document.getElementById("send-msg");
+  const output = document.getElementById("output");
+
+  const messageTypes = {
+    info: 0,
+    error: 1
+  }
+
+  const websocket = new WebSocket("ws://localhost:3000/ws");
+  websocket.onopen = function () {
+    const message = "Conexion establecida";
+    console.log(message);
+    // websocket.send(message);
+  };
+  websocket.onmessage = function (event) {
+    const messageStr = event.data;
+    const message = JSON.parse(messageStr)
+    output.innerText += `${Object.fromEntries(Object.entries(messageTypes).map(([k, v]) => [v, k]))[message.type]} - ${message.body}\n`
+
+  };
+
+  sendMsg.addEventListener("click", sendMessage);
+  msg.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") sendMessage()
+  })
+
+  function sendMessage() {
+    if (websocket.readyState === websocket.CLOSED)
+      return window.alert("Connection is clossed. Reload the page to re-connect");
+    const message = {
+      type: messageTypes.info,
+      body: msg.value
+    };
+
+
+    if (message.body) {
+      // Clearing the screen remainds on the client
+      if (message === "/clear") {
+        output.innerHTML = ""
+      } else {
+        websocket.send(JSON.stringify(message));
+      }
+      msg.value = "";
+    }
+  }
+</script>
+
+<style>
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    min-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+
+    font-family: sans-serif;
+    color: #fff;
+    background-color: #2d2d2f;
+  }
+
+  h1 {
+    font-size: 3rem;
+  }
+
+  .form {
+    width: min(90vw, 1000px, 59vw);
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  input,
+  button {
+    flex-basis: 0;
+    flex-grow: 1;
+    flex-shrink: 0;
+    min-width: 200px;
+    padding: 12px 8px;
+    font-size: 1.15rem;
+    border: none;
+    outline: 2px solid #454545;
+    border-radius: 12px;
+    background-color: #1c1c1c;
+    color: #aaa;
+    transition: outline-color 0.1s, flex-grow 0.5s;
+  }
+
+  input:focus,
+  input:hover,
+  button:hover {
+    outline-color: #09f;
+    box-shadow: 0 0 25px #09f4;
+  }
+
+  input:focus,
+  input:hover {
+    flex-grow: 3;
+  }
+
+  button {
+    font-weight: 800
+  }
+
+  #output {
+    height: 300px;
+    max-width: min(90vw, 1000px, 59vw);
+    text-wrap: wrap;
+    word-wrap: break-word;
+    overflow-y: auto;
+    padding: 20px;
+    font-family: "Fira Code", "Cascadia Code", consolas;
+    color: #aaa;
+    background-color: #1c1c1c;
+    border-radius: 12px;
+    outline: 2px solid #454545;
+    line-height: 1.8;
+  }
+
+  @media only screen and (max-width: 600px) {
+    h1 {
+      font-size: 1.8rem;
+    }
+  }
+</style>
+
+</html>
