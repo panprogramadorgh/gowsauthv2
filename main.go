@@ -14,8 +14,8 @@ import (
 )
 
 type Message struct {
-	Type int    `json:"type"`
-	Body string `json:"body"`
+	Type int `json:"type"`
+	Body any `json:"body"`
 }
 
 type UserCredentials struct {
@@ -23,8 +23,8 @@ type UserCredentials struct {
 	Password string `json:"password"`
 }
 
-type JwtPayload struct {
-	UserID int `json:"user_id"`
+type LoginRes struct {
+	Token string `json:"token"`
 }
 
 type UserPayload struct {
@@ -39,8 +39,8 @@ type User struct {
 	UserPayload
 }
 
-type LoginRes struct {
-	Token string `json:"token"`
+type JwtPayload struct {
+	UserID int `json:"user_id"`
 }
 
 /*
@@ -86,7 +86,7 @@ status, token, err := AuthenticateUser(db, c)
 
 status == 0 - err == nil
 
-status == 1 - err.Error() == {Username: "xx", Password: "xx"} invalid credentials
+status == 1 - err.Error() == {Username: xx, Password: xx} invalid credentials
 
 status == 2 - err.Error() == internal server error
 */
@@ -95,27 +95,11 @@ func AuthenticateUser(db *sql.DB, c UserCredentials) (int, string, error) {
 		`
 	SELECT * FROM users WHERE username = ? AND VERIFY(password, ?)
 	`
-	rows, err := db.Query(query, c.Username, c.Password)
+	row := db.QueryRow(query, c.Username, c.Password)
+
+	var user User = User{}
+	err := row.Scan(&user.UserID, &user.Username, &user.Password, &user.Firstname, &user.Lastname, &user.Admin)
 	if err != nil {
-		return 2, "", err
-	}
-
-	var user *User = nil
-	for rows.Next() {
-		// var UserID int
-		// var Username string
-		// var Password string
-		// var Firstname string
-		// var Lastname string
-		// var Admin bool
-
-		user = &User{}
-		err := rows.Scan(&user.UserID, &user.Username, &user.Password, &user.Firstname, &user.Lastname, &user.Admin)
-		if err != nil {
-			return 2, "", err
-		}
-	}
-	if user == nil {
 		return 1, "", fmt.Errorf("%+v invalid credentials", c)
 	}
 
@@ -179,7 +163,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer conn.Close()
 		for {
-			var m *Message = nil
+			var m Message
 			err := conn.ReadJSON(&m)
 			if err != nil {
 				fmt.Println(err)
@@ -195,44 +179,39 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					break
 				}
 			} else if m.Type == messageTypes["login"] {
-				var c UserCredentials
-				if err := json.Unmarshal([]byte(m.Body), &c); err != nil {
-					if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+				bodyBytes, err := json.Marshal(m.Body)
+				if err != nil {
+					fmt.Println(err)
+					break
+				}
+				c := &UserCredentials{}
+				if err := json.Unmarshal(bodyBytes, c); err != nil {
+					fmt.Println(err)
+					break
+				}
+
+				status, token, err := AuthenticateUser(wsh.DB, *c)
+				if err != nil {
+					errMessage := "internal server error"
+					if status == 1 {
+
+						errMessage = err.Error()
+					}
+					if err := conn.WriteJSON(NewErrorMessage(errMessage)); err != nil {
 						fmt.Println(err)
 						break
 					}
 				} else {
-					status, token, err := AuthenticateUser(wsh.DB, c)
-					if err != nil {
-						fmt.Println(status, err)
-						errMessage := "internal server error"
-						if status == 1 {
-							errMessage = err.Error()
-						}
-						if err := conn.WriteJSON(NewErrorMessage(errMessage)); err != nil {
-							fmt.Println(err)
-							break
-						}
-					} else {
-						// Success response
-						lr := LoginRes{
+					// Success response
+					resM := Message{
+						Type: messageTypes["login"],
+						Body: LoginRes{
 							Token: token,
-						}
-						jlr, err := json.Marshal(lr)
-						if err != nil {
-							if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-								fmt.Println(err)
-								break
-							}
-						}
-						resM := Message{
-							Type: messageTypes["info"],
-							Body: string(jlr),
-						}
-						if err := conn.WriteJSON(resM); err != nil {
-							fmt.Println(err)
-							return
-						}
+						},
+					}
+					if err := conn.WriteJSON(resM); err != nil {
+						fmt.Println(err)
+						return
 					}
 				}
 			} else {

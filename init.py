@@ -1,4 +1,5 @@
 import sqlite3
+import bcrypt
 
 # Crea el archivo
 open("./database.db", "w")
@@ -22,9 +23,12 @@ CREATE TABLE users (
 );
 """)
 
+salt = bcrypt.gensalt(16)
+hashed_password = bcrypt.hashpw(password=b"pass1", salt=salt).decode("utf-8")
+
 conn.execute("""
 INSERT INTO users (username, password, firstname, lastname, admin) VALUES (?, ?, ?, ?, ?);
-""", ("user1", "pass1", "paco", "sanz", 0))
+""", ("user1", hashed_password, "paco", "sanz", 0))
 
 conn.execute("""
 COMMIT;

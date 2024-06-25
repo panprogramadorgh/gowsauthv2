@@ -14,7 +14,7 @@
       <input type="text" id="msg" autofocus placeholder="Enter message (/ for commands)" />
       <button id="send-msg">Send</button>
     </div>
-    <div>
+    <div class="output-container">
       <pre id="output"></pre>
     </div>
   </div>
@@ -27,20 +27,32 @@
 
   const messageTypes = {
     info: 0,
-    error: 1
+    login: 1,
+    error: 2
+  }
+
+  function setLoading(state) {
+    const outputContainer = document.querySelector(".output-container")
+    if (state) {
+      const div = document.createElement("DIV")
+      div.classList.add("loading")
+      outputContainer.appendChild(div)
+    } else {
+      const div = outputContainer.querySelector(".loading")
+      outputContainer.removeChild(div)
+    }
   }
 
   const websocket = new WebSocket("ws://localhost:3000/ws");
   websocket.onopen = function () {
     const message = "Conexion establecida";
     console.log(message);
-    // websocket.send(message);
   };
   websocket.onmessage = function (event) {
     const messageStr = event.data;
     const message = JSON.parse(messageStr)
-    output.innerText += `${Object.fromEntries(Object.entries(messageTypes).map(([k, v]) => [v, k]))[message.type]} - ${message.body}\n`
-
+    output.innerText += `${Object.fromEntries(Object.entries(messageTypes).map(([k, v]) => [v, k]))[message.type]} - ${JSON.stringify(message.body)}\n`
+    setLoading(false)
   };
 
   sendMsg.addEventListener("click", sendMessage);
@@ -52,8 +64,11 @@
     if (websocket.readyState === websocket.CLOSED)
       return window.alert("Connection is clossed. Reload the page to re-connect");
     const message = {
-      type: messageTypes.info,
-      body: msg.value
+      type: messageTypes.login,
+      body: {
+        username: "user1",
+        password: "pass1"
+      }
     };
 
 
@@ -63,6 +78,7 @@
         output.innerHTML = ""
       } else {
         websocket.send(JSON.stringify(message));
+        setLoading(true)
       }
       msg.value = "";
     }
@@ -130,6 +146,22 @@
     font-weight: 800
   }
 
+  .output-container {
+    position: relative
+  }
+
+  .loading {
+    position: absolute;
+    top: calc(50% - 50px/2);
+    left: calc(50% - 50px/2);
+    width: 50px;
+    height: 50px;
+    border: 2px dashed #0099ff;
+    border-radius: 25%;
+    animation: loading_rotate 2s linear;
+    animation-iteration-count: infinite;
+  }
+
   #output {
     height: 300px;
     max-width: min(90vw, 1000px, 59vw);
@@ -143,6 +175,14 @@
     border-radius: 12px;
     outline: 2px solid #454545;
     line-height: 1.8;
+  }
+
+  @keyframes loading_rotate {
+    to {}
+
+    from {
+      transform: rotate(360deg)
+    }
   }
 
   @media only screen and (max-width: 600px) {
