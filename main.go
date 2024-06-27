@@ -23,8 +23,12 @@ type UserCredentials struct {
 	Password string `json:"password"`
 }
 
-type LoginRes struct {
+type LoginResMessage struct {
 	Token string `json:"token"`
+}
+
+type RegisterResMessage struct {
+	User User
 }
 
 type UserPayload struct {
@@ -39,6 +43,14 @@ type User struct {
 	UserPayload
 }
 
+type ErrorMessage struct {
+	Error string `json:"error"`
+}
+
+type InfoMessage struct {
+	Message string `json:"message"`
+}
+
 type JwtPayload struct {
 	UserID int `json:"user_id"`
 }
@@ -49,9 +61,10 @@ Secreto para los jsonwebtokens (modo desarrollo)
 const Secret = "aGVsbG8gd29ybGQ="
 
 var messageTypes = map[string]int{
-	"info":  0,
-	"login": 1,
-	"error": 2,
+	"info":     0,
+	"login":    1,
+	"register": 2,
+	"error":    3,
 }
 
 func (p *UserPayload) HashPassword() error {
@@ -113,10 +126,60 @@ func AuthenticateUser(db *sql.DB, c UserCredentials) (int, string, error) {
 	return 0, token, nil
 }
 
+func RegisterUser(db *sql.DB, p UserPayload) error {
+	query :=
+		`
+	INSERT INTO users (username, password, firstname, lastname, admin) VALUES (?, ?, ?, ?, ?)
+	`
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(p.Password), 16)
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(query, p.Username, hashedPassword, p.Firstname, p.Lastname, p.Admin); err != nil {
+		return err
+	}
+	return nil
+}
+
+func GetUser(db *sql.DB, u string) *User {
+	query :=
+		`
+	SELECT * FROM users WHERE username = ?
+	`
+	row := db.QueryRow(query, u)
+	if row == nil {
+		return nil
+	}
+	var (
+		userID int
+		username,
+		password,
+		firstname,
+		lastname string
+		admin int
+	)
+	row.Scan(&userID, &username, &password, &firstname, &lastname, &admin)
+	user := &User{
+		UserID: userID,
+		UserPayload: UserPayload{
+			UserCredentials: UserCredentials{
+				Username: username,
+				Password: password,
+			},
+			Firstname: firstname,
+			Lastname:  lastname,
+			Admin:     admin,
+		},
+	}
+	return user
+}
+
 func NewErrorMessage(errBody string) Message {
 	return Message{
 		Type: messageTypes["error"],
-		Body: errBody,
+		Body: ErrorMessage{
+			Error: errBody,
+		},
 	}
 }
 
@@ -170,49 +233,100 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 				break
 			}
 			if m.Type == messageTypes["info"] {
-				resM := Message{
-					Type: messageTypes["info"],
-					Body: "Hello World",
+				if body, ok := m.Body.(string); ok {
+					var info InfoMessage
+					if err := json.Unmarshal([]byte(body), &info); err != nil {
+						fmt.Println(err)
+						break
+					}
+					if err := conn.WriteJSON(Message{
+						Type: messageTypes["info"],
+						Body: info,
+					}); err != nil {
+						fmt.Println(err)
+						break
+					}
+					continue
 				}
-				if err := conn.WriteJSON(resM); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
 					fmt.Println(err)
 					break
 				}
 			} else if m.Type == messageTypes["login"] {
-				bodyBytes, err := json.Marshal(m.Body)
-				if err != nil {
-					fmt.Println(err)
-					break
-				}
-				c := &UserCredentials{}
-				if err := json.Unmarshal(bodyBytes, c); err != nil {
-					fmt.Println(err)
-					break
-				}
-
-				status, token, err := AuthenticateUser(wsh.DB, *c)
-				if err != nil {
-					errMessage := "internal server error"
-					if status == 1 {
-
-						errMessage = err.Error()
-					}
-					if err := conn.WriteJSON(NewErrorMessage(errMessage)); err != nil {
+				if body, ok := m.Body.(string); ok {
+					var c UserCredentials
+					if err := json.Unmarshal([]byte(body), &c); err != nil {
 						fmt.Println(err)
 						break
 					}
-				} else {
+
+					status, token, err := AuthenticateUser(wsh.DB, c)
+					if err != nil {
+						fmt.Println(err)
+						errMessage := "internal server error"
+						if status == 1 {
+							errMessage = err.Error()
+						}
+						if err := conn.WriteJSON(NewErrorMessage(errMessage)); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
 					// Success response
 					resM := Message{
 						Type: messageTypes["login"],
-						Body: LoginRes{
+						Body: LoginResMessage{
 							Token: token,
 						},
 					}
 					if err := conn.WriteJSON(resM); err != nil {
 						fmt.Println(err)
-						return
+						break
 					}
+
+					continue
+				}
+				if err := conn.WriteJSON(NewErrorMessage("invalid message bodys")); err != nil {
+					fmt.Println(err)
+					break
+				}
+			} else if m.Type == messageTypes["register"] {
+				if body, ok := m.Body.(string); ok {
+					var userPayload UserPayload
+					if err := json.Unmarshal([]byte(body), &userPayload); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						break
+					}
+
+					if err := RegisterUser(wsh.DB, userPayload); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						break
+					}
+
+					user := GetUser(wsh.DB, userPayload.Username)
+
+					resM := Message{
+						Type: messageTypes["register"],
+						Body: RegisterResMessage{
+							User: *user,
+						},
+					}
+					if err := conn.WriteJSON(resM); err != nil {
+						fmt.Println(err)
+						break
+					}
+					continue
+				}
+				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+					fmt.Println(err)
+					break
 				}
 			} else {
 				if err := conn.WriteJSON(NewErrorMessage("invalid message type")); err != nil {

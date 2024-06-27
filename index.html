@@ -11,7 +11,8 @@
   <h1>Websocket Server</h1>
   <div>
     <div class="form">
-      <input type="text" id="msg" autofocus placeholder="Enter message (/ for commands)" />
+      <input type="text" id="msg-type" autofocus placeholder="Enter message (/ for commands)" />
+      <textarea id="msg"></textarea>
       <button id="send-msg">Send</button>
     </div>
     <div class="output-container">
@@ -21,6 +22,7 @@
 </body>
 
 <script>
+  const msgType = document.getElementById("msg-type");
   const msg = document.getElementById("msg");
   const sendMsg = document.getElementById("send-msg");
   const output = document.getElementById("output");
@@ -28,7 +30,8 @@
   const messageTypes = {
     info: 0,
     login: 1,
-    error: 2
+    register: 2,
+    error: 3
   }
 
   function setLoading(state) {
@@ -57,19 +60,17 @@
 
   sendMsg.addEventListener("click", sendMessage);
   msg.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") sendMessage()
+    if (event.key === "Enter" && !event.shiftKey) sendMessage()
   })
 
   function sendMessage() {
     if (websocket.readyState === websocket.CLOSED)
       return window.alert("Connection is clossed. Reload the page to re-connect");
     const message = {
-      type: messageTypes.login,
-      body: {
-        username: "user1",
-        password: "pass1"
-      }
+      type: messageTypes[msgType.value || "info"],
+      body: msg.value || {}
     };
+    console.log(message)
 
 
     if (message.body) {
@@ -80,7 +81,6 @@
         websocket.send(JSON.stringify(message));
         setLoading(true)
       }
-      msg.value = "";
     }
   }
 </script>
@@ -115,7 +115,8 @@
   }
 
   input,
-  button {
+  button,
+  textarea {
     flex-basis: 0;
     flex-grow: 1;
     flex-shrink: 0;
@@ -132,13 +133,17 @@
 
   input:focus,
   input:hover,
+  textarea:focus,
+  textarea:hover,
   button:hover {
     outline-color: #09f;
     box-shadow: 0 0 25px #09f4;
   }
 
   input:focus,
-  input:hover {
+  input:hover,
+  textarea:focus,
+  textarea:hover {
     flex-grow: 3;
   }
 
