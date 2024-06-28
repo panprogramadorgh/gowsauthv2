@@ -4,6 +4,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Jetbrains mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap"
+    rel="stylesheet">
+
   <title>Websocket Server</title>
 </head>
 
@@ -12,7 +19,7 @@
   <div>
     <div class="form">
       <input type="text" id="msg-type" autofocus placeholder="Enter message (/ for commands)" />
-      <textarea id="msg"></textarea>
+      <textarea spellcheck="false" id="msg"></textarea>
       <button id="send-msg">Send</button>
     </div>
     <div class="output-container">
@@ -28,10 +35,12 @@
   const output = document.getElementById("output");
 
   const messageTypes = {
-    info: 0,
-    login: 1,
-    register: 2,
-    error: 3
+    "guest": 0,
+    "shout": 1,
+    "users": 2,
+    "login": 3,
+    "register": 4,
+    "error": 5,
   }
 
   function setLoading(state) {
@@ -47,6 +56,8 @@
   }
 
   const websocket = new WebSocket("ws://localhost:3000/ws");
+
+  // Eventos websocket
   websocket.onopen = function () {
     const message = "Conexion establecida";
     console.log(message);
@@ -57,6 +68,10 @@
     output.innerText += `${Object.fromEntries(Object.entries(messageTypes).map(([k, v]) => [v, k]))[message.type]} - ${JSON.stringify(message.body)}\n`
     setLoading(false)
   };
+  websocket.onerror = function () {
+    setLoading(false)
+    window.alert("Connection is clossed. Reload the page to re-connect");
+  }
 
   sendMsg.addEventListener("click", sendMessage);
   msg.addEventListener("keydown", (event) => {
@@ -67,25 +82,23 @@
     if (websocket.readyState === websocket.CLOSED)
       return window.alert("Connection is clossed. Reload the page to re-connect");
     const message = {
-      type: messageTypes[msgType.value || "info"],
-      body: msg.value || {}
+      type: messageTypes[msgType.value],
+      body: msg.value
     };
     console.log(message)
 
-
-    if (message.body) {
-      // Clearing the screen remainds on the client
-      if (message === "/clear") {
-        output.innerHTML = ""
-      } else {
-        websocket.send(JSON.stringify(message));
-        setLoading(true)
-      }
+    if (message.body && message.type !== undefined) {
+      websocket.send(JSON.stringify(message));
+      setLoading(true)
     }
   }
 </script>
 
 <style>
+  :root {
+    --font-mono: "JetBrains Mono", monospace;
+  }
+
   * {
     box-sizing: border-box;
   }
@@ -131,6 +144,10 @@
     transition: outline-color 0.1s, flex-grow 0.5s;
   }
 
+  textarea {
+    font-family: var(--font-mono)
+  }
+
   input:focus,
   input:hover,
   textarea:focus,
@@ -174,7 +191,7 @@
     word-wrap: break-word;
     overflow-y: auto;
     padding: 20px;
-    font-family: "Fira Code", "Cascadia Code", consolas;
+    font-family: var(--font-mono);
     color: #aaa;
     background-color: #1c1c1c;
     border-radius: 12px;
