@@ -14,63 +14,41 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Definicion de estructuras para los principales items del websocket ------
+
 // Estructura de mensajes websocket
-type Message struct {
+type WSMessage struct {
+	/*
+		// Diferentes tipos de mensajes
+		var MessageTypes = map[string]int{
+			"guest":    0,
+			"shout":    1,
+			"users":    2,
+			"messages": 3,
+			"login":    4,
+			"register": 5,
+			"error":    6,
+		}
+
+		loginMsgType := MessageTypes["login"]
+
+		wsm := WSMessage{
+			Type: loginMsgType,
+			Body: LoginMsgResBody{
+				Token: "xxx.xxx.xxx"
+			}
+		}
+	*/
 	Type int `json:"type"`
-	// Existen diferentes tipos de cuerpos (InfoBody, UsersResBody, LoginResBody, etc)
+	// En funcion del tipo de WSMessage hay diferentes cuerpos. Por ejemplo si queremos identificarnos como un usuario, tendremos que enviar desde el cliente un mensaje de tipo login con el correspondiente cuerpo teniendo en cuenta que es un mensaje login de peticion; en este caso deberiamos enviar un cuerpo de tipo LoginMsgReqBody
 	Body any `json:"body"`
 }
 
-// Cuerpo para mensajes de respuesta de tipo users
-type UsersResBody struct {
-	Users []User `json:"users"`
-}
-
-// Utilizado para identificar credenciales en cuerpos de mensajes de solicitud de tipo register
-type LoginReqBody struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// Cuerpo de mensaje de respuesta login
-type LoginResBody struct {
-	Token string `json:"token"`
-}
-
-// Utilizado para definir Users asi como identificar datos del usuario a registrar en el cuerpo de los mensajes register de solicitud
-type UserPayload struct {
-	Username  string `json:"username"`
-	Password  string `json:"password"`
-	Firstname string `json:"firstname"`
-	Lastname  string `json:"lastname"`
-	Admin     int    `json:"admin"`
-}
-
-// Cuerpo de mensaje de respuesta register
-type RegisterResBody struct {
-	User User `json:"user"`
-}
-
-// Cuerpo de mensajes error
-type ErrorBody struct {
-	Error string `json:"error"`
-}
-
-// Cuerpo de mensaje de respuesta de tipo Shout. Shout es el unico tipo de mensaje que queda registrado en la base de datos.
-type ShoutResBody struct {
-	Owner   int    `json:"owner"`
-	Message string `json:"message"`
-}
-
-// Cuerpo de mensaje de solicitud de tipo Shout. Shout es el unico tipo de mensaje que queda registrado en la base de datos.
-type ShoutReqBody struct {
-	Token   string `json:"token"`
-	Message string `json:"message"`
-}
-
-// Cuerpo de mensaje guet.
-type GuestBody struct {
-	Message string `json:"message"`
+// Estructura de mensaje (a guardar en la base de datos tras mandar mensaje websocket shout)
+type Message struct {
+	MessageID int    `json:"message_id"`
+	Owner     int    `json:"owner"`
+	Message   string `json:"message"`
 }
 
 // Estructura de usuarios
@@ -79,23 +57,96 @@ type User struct {
 	UserPayload
 }
 
-// Estructura de los claims para los JWT
-type JwtPayload struct {
-	UserID int `json:"user_id"`
+// Agrupa los campos necesarios para definir un usuario
+type UserPayload struct {
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	Firstname string `json:"firstname"`
+	Lastname  string `json:"lastname"`
+	Admin     int    `json:"admin"`
 }
 
-/*
-Secreto para los jsonwebtokens (modo desarrollo)
-*/
+// Estructura de los claims para los JWT
+type JwtPayload struct {
+	UserID int
+}
+
+// Cuerpo de mensajes error (respuesta)
+type ErrorMsgBody struct {
+	Error string `json:"error"`
+}
+
+// Cuerpos asociados mensajes websocket con entrada de datos del cliente (ejemplo: cuerpos para mensajes de tipo login, los cuales reciben credenciales de un cliente) ------
+
+// Cuerpo de mensajes users (respuesta)
+type UsersMsgReqBody struct {
+	Token string `json:"token"`
+}
+
+// Cuerpo de mensajes users (respuesta)
+type UsersMsgResBody struct {
+	Users []User `json:"users"`
+}
+
+// Cuerpo de mensajes messages (respuesta)
+type MessagesMsgResBody struct {
+	Messages []Message `json:"messages"`
+}
+
+// Cuerpo de mensajes messages (solicitud)
+type MessagesMsgReqBody struct {
+	Token string `json:"token"`
+}
+
+// Cuerpo de mensaje login (solicitud)
+type LoginMsgReqBody struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// Cuerpo de mensaje login (respuesta)
+type LoginMsgResBody struct {
+	Token string `json:"token"`
+}
+
+// Cuerpo de mensaje register (solicitud)
+type RegisterMsgReqBody UserPayload
+
+// Cuerpo de mensaje register (respuesta)
+type RegisterMsgResBody struct {
+	User User `json:"user"`
+}
+
+// Cuerpo de mensaje shout (solicitud)
+type ShoutMsgReqBody struct {
+	Token   string `json:"token"`   // Necesario para autenticar el usuario al que se hace referencia en los claims del jwt
+	Message string `json:"message"` // Contenido de mensaje a registrar
+}
+
+// Cuerpo de mensaje shout (respuesta)
+type ShoutMsgResBody struct {
+	Owner   int    `json:"owner"`
+	Message string `json:"message"`
+}
+
+// Cuerpo de mensaje guest (solicitud & respuesta).
+type GuestMsgBody struct {
+	Message string `json:"message"`
+}
+
+// Constantes y variables globales ------
+
+// Secreto para los jsonwebtokens (modo desarrollo)
 const Secret = "aGVsbG8gd29ybGQ="
 
 var MessageTypes = map[string]int{
 	"guest":    0,
 	"shout":    1,
 	"users":    2,
-	"login":    3,
-	"register": 4,
-	"error":    5,
+	"messages": 3,
+	"login":    4,
+	"register": 5,
+	"error":    6,
 }
 
 // Slice de conexiones websocket
@@ -119,15 +170,37 @@ func VerifyPassword(hash string, password string) bool {
 	return true
 }
 
-func (t JwtPayload) NewToken(secret string) (string, error) {
-	p := jwt.Payload{
-		"UserID": t.UserID,
+func (p JwtPayload) NewToken(secret string) (string, error) {
+	newP := jwt.Payload{
+		"UserID": p.UserID,
 	}
-	token, err := p.SignWithHS256(secret)
+	token, err := newP.SignWithHS256(secret)
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// Funcion verificadora de token (asi como del usuario asociado a dicho token)
+func VerifyToken(db *sql.DB, secret string, t string) (*JwtPayload, error) {
+	rawP, err := jwt.VerifyWithHS256(secret, t)
+	if err != nil {
+		return nil, err
+	}
+	pBytes, err := json.Marshal(rawP)
+	if err != nil {
+		return nil, err
+	}
+	var p JwtPayload
+	if err := json.Unmarshal(pBytes, &p); err != nil {
+		return nil, err
+	}
+	// Tras verificar el token se comprueba que este apunte a un usuario existente
+	user, err := GetUserById(db, p.UserID)
+	if err != nil && user == nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 /*
@@ -139,7 +212,7 @@ status == 1 - err.Error() == {Username: xx, Password: xx} invalid credentials
 
 status == 2 - err.Error() == internal server error
 */
-func AuthenticateUser(db *sql.DB, c LoginReqBody) (int, string, error) {
+func AuthenticateUser(db *sql.DB, c LoginMsgReqBody) (int, string, error) {
 	query :=
 		`
 	SELECT * FROM users WHERE username = ? AND VERIFY(password, ?)
@@ -163,19 +236,26 @@ func AuthenticateUser(db *sql.DB, c LoginReqBody) (int, string, error) {
 }
 
 func RegisterUser(db *sql.DB, p UserPayload) error {
-	// Asegurarse de que el username es unico en la base de datos
-	query :=
-		`
-	SELECT * FROM users WHERE username = "?"
-	`
-	row := db.QueryRow(query, p.Username)
-	if row != nil {
-		// Si la fila existe hay que tirar un error
-		return fmt.Errorf("%s for username is taken", p.Username)
+	// Comprobacion basica de los campos del userpayload
+	if strings.Trim(p.Username, " ") == "" {
+		return fmt.Errorf("invalid username for new user")
+	} else if strings.Trim(p.Password, " ") == "" {
+		return fmt.Errorf("invalid password for new user")
+	} else if strings.Trim(p.Firstname, " ") == "" {
+		return fmt.Errorf("invalid firstname for new user")
+	} else if strings.Trim(p.Lastname, " ") == "" {
+		return fmt.Errorf("invalid lastname for new user")
+	} else if p.Admin != 0 && p.Admin != 1 {
+		return fmt.Errorf("%+v is invalid value for admin field", p.Admin)
+	}
+
+	_, err := GetUserByUsername(db, p.Username)
+	if err == nil {
+		return fmt.Errorf("username for new user is already taken")
 	}
 
 	// Insertar nuevo usuario
-	query =
+	query :=
 		`
 	INSERT INTO users (username, password, firstname, lastname, admin) VALUES (?, ?, ?, ?, ?)
 	`
@@ -195,9 +275,6 @@ func GetUserByUsername(db *sql.DB, u string) (*User, error) {
 	SELECT * FROM users WHERE username = ?
 	`
 	row := db.QueryRow(query, u)
-	if row == nil {
-		return nil, fmt.Errorf("user with username = %s doesn't exist", u)
-	}
 	var (
 		userID int
 		username,
@@ -228,9 +305,6 @@ func GetUserById(db *sql.DB, id int) (*User, error) {
 	SELECT * FROM users WHERE user_id = ?
 	`
 	row := db.QueryRow(query, id)
-	if row == nil {
-		return nil, fmt.Errorf("user with user_id = %d doesn't exist", id)
-	}
 	var (
 		userID int
 		username,
@@ -293,23 +367,54 @@ func GetAllUsers(db *sql.DB) ([]User, error) {
 
 // Funciones relacionadas con los mensajes ------
 
-func NewErrorMessage(errBody string) Message {
-	return Message{
+// Funcion constructora para mensajes de error
+func NewErrorMessage(errBody string) WSMessage {
+	return WSMessage{
 		Type: MessageTypes["error"],
-		Body: ErrorBody{
+		Body: ErrorMsgBody{
 			Error: errBody,
 		},
 	}
 }
 
-// Funcion encargada de guardar cuerpo de mensajes Shout en la base de datos
-func SaveMessage(db *sql.DB, sRes ShoutResBody) error {
+// Funcion encargada de guardar mensajes en la base de datos
+func SaveMessage(db *sql.DB, sRes ShoutMsgResBody) error {
 	query :=
 		`
 	INSERT INTO messages (owner, message) VALUES (?, ?)
 	`
 	_, err := db.Exec(query, sRes.Owner, sRes.Message)
 	return err
+}
+
+// Funcion encargada de recoger todos los cuerpos de mensaje de tipo shout guardados en la base de datos
+func GetAllMessages(db *sql.DB) ([]Message, error) {
+	query :=
+		`
+	SELECT * FROM messages
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	messages := []Message{}
+	for rows.Next() {
+		var (
+			messageID int
+			owner     int
+			message   string
+		)
+		if err := rows.Scan(&messageID, &owner, &message); err != nil {
+			return nil, err
+		}
+		m := Message{
+			MessageID: messageID,
+			Owner:     owner,
+			Message:   message,
+		}
+		messages = append(messages, m)
+	}
+	return messages, nil
 }
 
 // Funciones de la base de datos ------
@@ -348,10 +453,10 @@ var upgrader = websocket.Upgrader{
 }
 
 // Elimina la conexion del slice de conexiones y la cierra
-func ClearConnection(connections *[]*websocket.Conn, conn *websocket.Conn) error {
-	for i, eachConn := range *connections {
+func ClearConnection(conn *websocket.Conn) error {
+	for i, eachConn := range Connections {
 		if eachConn == conn {
-			*connections = append((*connections)[:i], (*connections)[:i+1]...)
+			Connections = append((Connections)[:i], (Connections)[i+1:]...)
 			if err := conn.Close(); err != nil {
 				return err
 			}
@@ -370,28 +475,31 @@ type Handler interface {
 // Definicion del manejador websocket  ------
 
 type WSHandler struct {
-	DB          *sql.DB
-	Connections *[]*websocket.Conn
+	DB *sql.DB
 }
 
 func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if err := ClearConnection(&Connections, conn); err != nil {
+			if err := ClearConnection(conn); err != nil {
 				// En caso de que no se pueda cerrar la conexion se muestra el error
 				fmt.Println(err)
 			}
 		}()
 		for {
-			var m Message
+			var m WSMessage
 			err := conn.ReadJSON(&m)
 			if err != nil {
 				fmt.Println(err)
 				break
 			}
+
+			// Comprobar las conexiones cada vez que se envia un mensaje
+			fmt.Printf("%v\n", Connections)
+
 			if m.Type == MessageTypes["guest"] {
 				if body, ok := m.Body.(string); ok {
-					var guest GuestBody
+					var guest GuestMsgBody
 					if err := json.Unmarshal([]byte(body), &guest); err != nil {
 						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
 							fmt.Println(err)
@@ -406,8 +514,8 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-					for _, eachConn := range *wsh.Connections {
-						if err := eachConn.WriteJSON(Message{
+					for _, eachConn := range Connections {
+						if err := eachConn.WriteJSON(WSMessage{
 							Type: MessageTypes["guest"],
 							Body: guest,
 						}); err != nil {
@@ -422,7 +530,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 				}
 			} else if m.Type == MessageTypes["shout"] {
 				if body, ok := m.Body.(string); ok {
-					var sReq ShoutReqBody
+					var sReq ShoutMsgReqBody
 					if err := json.Unmarshal([]byte(body), &sReq); err != nil {
 						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
 							fmt.Println(err)
@@ -437,42 +545,21 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-					rawP, err := jwt.VerifyWithHS256(Secret, sReq.Token)
-					if err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					pBytes, err := json.Marshal(rawP)
-					if err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					/* FIXME: Error con la deserializacion json:
-					Por algun motivo el valor de la propiedad UserID cambia de 1 a 0.
-					*/
-					fmt.Println("Serializado: ", string(pBytes))
-					var p JwtPayload
-					if err := json.Unmarshal(pBytes, &p); err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					fmt.Printf("Deserializado: %+v\n", p)
 
-					sRes := ShoutResBody{
+					p, err := VerifyToken(wsh.DB, Secret, sReq.Token)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					sRes := ShoutMsgResBody{
 						Owner:   p.UserID,
 						Message: sReq.Message,
 					}
 
-					// Guardar cuerpo del mensaje en la base de datos
+					// Guardar message en la base de datos
 					if err := SaveMessage(wsh.DB, sRes); err != nil {
 						if err := conn.WriteJSON(err.Error()); err != nil {
 							fmt.Println(err)
@@ -482,8 +569,11 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 
 					// Enviar mensaje a todas las conexiones websocket
-					for _, eachConn := range *wsh.Connections {
-						if err := eachConn.WriteJSON(sRes); err != nil {
+					for _, eachConn := range Connections {
+						if err := eachConn.WriteJSON(WSMessage{
+							Type: MessageTypes["shout"],
+							Body: sRes,
+						}); err != nil {
 							fmt.Println(err)
 						}
 					}
@@ -495,26 +585,123 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					break
 				}
 			} else if m.Type == MessageTypes["users"] {
-				users, err := GetAllUsers(wsh.DB)
-				if err != nil {
-					if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+				if body, ok := m.Body.(string); ok {
+					var uReq UsersMsgReqBody
+					if err := json.Unmarshal([]byte(body), &uReq); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					// Comprobar que el usuario asociado al token tenga el valor 1 para el campo admin.
+					p, err := VerifyToken(wsh.DB, Secret, uReq.Token)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					user, err := GetUserById(wsh.DB, p.UserID)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					if user.Admin != 1 {
+						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value 1 for admin field")); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					users, err := GetAllUsers(wsh.DB)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					uRes := UsersMsgResBody{
+						Users: users,
+					}
+					if err := conn.WriteJSON(WSMessage{
+						Type: MessageTypes["users"],
+						Body: uRes,
+					}); err != nil {
 						fmt.Println(err)
 						break
 					}
 					continue
 				}
-				if err := conn.WriteJSON(Message{
-					Type: MessageTypes["users"],
-					Body: UsersResBody{
-						Users: users,
-					},
-				}); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+					fmt.Println(err)
+					break
+				}
+			} else if m.Type == MessageTypes["messages"] {
+				if body, ok := m.Body.(string); ok {
+					var mReq MessagesMsgReqBody
+					if err := json.Unmarshal([]byte(body), &mReq); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					// Comprobar que el usuario asociado al token tenga el valor 1 para la propiedad admin.
+					p, err := VerifyToken(wsh.DB, Secret, mReq.Token)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					user, err := GetUserById(wsh.DB, p.UserID)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					if user.Admin != 1 {
+						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value 1 for admin field")); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					messages, err := GetAllMessages(wsh.DB)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					if err := conn.WriteJSON(WSMessage{
+						Type: MessageTypes["messages"],
+						Body: MessagesMsgResBody{
+							Messages: messages,
+						},
+					}); err != nil {
+						fmt.Println(err)
+						break
+					}
+					continue
+				}
+				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
 					fmt.Println(err)
 					break
 				}
 			} else if m.Type == MessageTypes["login"] {
 				if body, ok := m.Body.(string); ok {
-					var c LoginReqBody
+					var c LoginMsgReqBody
 					if err := json.Unmarshal([]byte(body), &c); err != nil {
 						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
 							fmt.Println(err)
@@ -522,7 +709,6 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-
 					status, token, err := AuthenticateUser(wsh.DB, c)
 					if err != nil {
 						errMessage := "internal server error"
@@ -536,9 +722,9 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						continue
 					}
 					// Success response
-					resM := Message{
+					resM := WSMessage{
 						Type: MessageTypes["login"],
-						Body: LoginResBody{
+						Body: LoginMsgResBody{
 							Token: token,
 						},
 					}
@@ -546,7 +732,6 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						fmt.Println(err)
 						break
 					}
-
 					continue
 				}
 				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
@@ -582,9 +767,9 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						continue
 					}
 
-					resM := Message{
+					resM := WSMessage{
 						Type: MessageTypes["register"],
-						Body: RegisterResBody{
+						Body: RegisterMsgResBody{
 							User: *user,
 						},
 					}
@@ -609,8 +794,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 }
 
 type UpgraderMid struct {
-	Next        func(conn *websocket.Conn) http.HandlerFunc
-	Connections *[]*websocket.Conn
+	Next func(conn *websocket.Conn) http.HandlerFunc
 }
 
 func (m UpgraderMid) Handle(conn *websocket.Conn) http.HandlerFunc {
@@ -621,7 +805,7 @@ func (m UpgraderMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 			return
 		}
 		// Agrega la nueva conexion websocker al slice de conexiones
-		*m.Connections = append(*m.Connections, newConn)
+		Connections = append(Connections, newConn)
 		m.Next(newConn).ServeHTTP(w, r)
 	}
 }
@@ -665,13 +849,11 @@ func main() {
 				DB: db,
 				Next: func(conn *websocket.Conn) http.HandlerFunc {
 					return WSHandler{
-						DB:          db,
-						Connections: &Connections,
+						DB: db,
 					}.Handle(conn)
 				},
 			}.Handle(conn)
 		},
-		Connections: &Connections,
 	}
 
 	http.HandleFunc("/ws", wshandler.Handle(nil))

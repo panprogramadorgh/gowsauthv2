@@ -15,6 +15,9 @@
 </head>
 
 <body>
+  <header>
+    <button id="reconnect">Reconnect</button>
+  </header>
   <h1>Websocket Server</h1>
   <div>
     <div class="form">
@@ -28,7 +31,7 @@
   </div>
 </body>
 
-<script>
+<script type="module">
   const msgType = document.getElementById("msg-type");
   const msg = document.getElementById("msg");
   const sendMsg = document.getElementById("send-msg");
@@ -38,9 +41,10 @@
     "guest": 0,
     "shout": 1,
     "users": 2,
-    "login": 3,
-    "register": 4,
-    "error": 5,
+    "messages": 3,
+    "login": 4,
+    "register": 5,
+    "error": 6,
   }
 
   function setLoading(state) {
@@ -55,29 +59,13 @@
     }
   }
 
-  const websocket = new WebSocket("ws://localhost:3000/ws");
-
-  // Eventos websocket
-  websocket.onopen = function () {
-    const message = "Conexion establecida";
-    console.log(message);
-  };
-  websocket.onmessage = function (event) {
-    const messageStr = event.data;
-    const message = JSON.parse(messageStr)
-    output.innerText += `${Object.fromEntries(Object.entries(messageTypes).map(([k, v]) => [v, k]))[message.type]} - ${JSON.stringify(message.body)}\n`
-    setLoading(false)
-  };
-  websocket.onerror = function () {
-    setLoading(false)
-    window.alert("Connection is clossed. Reload the page to re-connect");
+  function connect() {
+    return new WebSocket("ws://localhost:3000/ws");
   }
 
-  sendMsg.addEventListener("click", sendMessage);
-  msg.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) sendMessage()
-  })
+  const websocket = connect()
 
+  // Funcion para enviar mensajes
   function sendMessage() {
     if (websocket.readyState === websocket.CLOSED)
       return window.alert("Connection is clossed. Reload the page to re-connect");
@@ -92,6 +80,36 @@
       setLoading(true)
     }
   }
+
+  // Eventos websocket
+  websocket.onopen = function () {
+    const message = "Conexion establecida";
+    console.log(message);
+  };
+  websocket.onmessage = function (event) {
+    const messageStr = event.data;
+    const message = JSON.parse(messageStr)
+    console.log(message)
+    output.innerText += `${Object.fromEntries(Object.entries(messageTypes).map(([k, v]) => [v, k]))[message.type]} - ${JSON.stringify(message.body)}\n`
+    setLoading(false)
+  };
+  websocket.onerror = function () {
+    setLoading(false)
+    window.alert("Connection is clossed. Reload the page to re-connect");
+  }
+
+  // Evento para enviar mensaje
+  sendMsg.addEventListener("click", sendMessage);
+  msg.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) sendMessage()
+  })
+</script>
+
+<script>
+  const reconnect = document.getElementById("reconnect")
+  reconnect.addEventListener("click", function () {
+    window.history.go(0)
+  })
 </script>
 
 <style>
@@ -113,6 +131,17 @@
     font-family: sans-serif;
     color: #fff;
     background-color: #2d2d2f;
+  }
+
+  header {
+    width: 100vw;
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 2vw;
+  }
+
+  header button {
+    max-width: 100px;
   }
 
   h1 {
