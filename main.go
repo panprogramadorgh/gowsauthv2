@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/mattn/go-sqlite3"
@@ -69,6 +71,11 @@ type UserPayload struct {
 // Estructura de los claims para los JWT
 type JwtPayload struct {
 	UserID int
+}
+
+// Cuerpo de mensaje weigth (respuesta)
+type WeigthMsgBody struct {
+	Weigth int `json:"weigth"`
 }
 
 // Cuerpo de mensajes error (respuesta)
@@ -134,11 +141,51 @@ type GuestMsgBody struct {
 	Message string `json:"message"`
 }
 
+// Tipos relacionados con sistema de balanceo de carga ------
+
+type WSServer struct {
+	Type    int
+	Address string
+	Port    string
+}
+
+func (wss WSServer) BuildWSConnectionURL() string {
+	return fmt.Sprintf("ws://%s:%s", wss.Address, wss.Port)
+}
+
+// Configuracion general para servidor ------
+
+var WSServerTypes = map[string]int{
+	"master": 0,
+	"slave":  1,
+}
+
+// Es importante configurar independieme cada servidor para que funcione el cluster de servidores.
+var Config = map[string]any{
+	"defaultPort":  "3000",
+	"databasePath": "/home/alvaro/dist/database.db",
+	"wsServerType": WSServerTypes["master"],
+}
+
 // Constantes y variables globales ------
+
+var WSServers = []WSServer{
+	{
+		Type:    WSServerTypes["master"],
+		Address: "172.28.118.33",
+		Port:    "3000",
+	},
+	{
+		Type:    WSServerTypes["slave"],
+		Address: "172.28.118.33",
+		Port:    "3131",
+	},
+}
 
 // Secreto para los jsonwebtokens (modo desarrollo)
 const Secret = "aGVsbG8gd29ybGQ="
 
+// Tipos de WSMessages
 var MessageTypes = map[string]int{
 	"guest":    0,
 	"shout":    1,
@@ -146,11 +193,56 @@ var MessageTypes = map[string]int{
 	"messages": 3,
 	"login":    4,
 	"register": 5,
-	"error":    6,
+	"weight":   6,
+	"error":    7,
 }
 
 // Slice de conexiones websocket
 var Connections = []*websocket.Conn{}
+
+// Funciones de utilidades genericas
+
+/*
+Funcion para comparar los int a los que apuntan los punteros del slice proporcionado como parametro. En caso de error la funcion retornara -1. Algunas situaciones donde la funcion retorna -1 son:
+
+1. Cuando todos los punteros sean nil
+
+2. Si la longitud del slice es inferior a 1
+*/
+func GetIndexOfMinorIntPointer(numbers []*int) int {
+	if len(numbers) < 1 {
+		return -1
+	}
+	lowerPointer := numbers[0]
+	for _, nPointer := range numbers {
+		if nPointer == nil {
+			continue
+		}
+		if lowerPointer == nil {
+			lowerPointer = nPointer
+			continue
+		}
+		n := *nPointer
+		lower := *lowerPointer
+		if n < lower {
+			lowerPointer = nPointer
+		}
+	}
+	if lowerPointer == nil {
+		return -1
+	}
+	lower := *lowerPointer
+
+	// Obtiene el indice del puntero de int menor dentro del slice de numeros pasado como parametro
+	indexOfLower := -1
+	for i, eachNumber := range numbers {
+		if *eachNumber == lower {
+			indexOfLower = i
+		}
+	}
+
+	return indexOfLower
+}
 
 // Funciones relacionadas con los usuarios ------
 
@@ -444,12 +536,112 @@ func RegisterSQLFunc(db *sql.DB, n string, f any) error {
 
 // Utilidades websocket ------
 
-var upgrader = websocket.Upgrader{
+var Upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
+		if Config["wsServerType"] == WSServerTypes["slave"] {
+			// Es imposible que retorne un error porque al principio de la aplicacion se hace una comprobacion de la configuracion de los WSServers tirando un panic en caso de fallo
+			masterWSServer, _ := GetMasterWSServer()
+			r.URL.Port()
+			return r.RemoteAddr == fmt.Sprintf("%s:%s", masterWSServer.Address, masterWSServer.Port)
+		}
+		// Si el servidor es maestro entonces admide conexiones websocket desde cualquier sitio
 		return true
 	},
+}
+
+func GetMasterWSServer() (*WSServer, error) {
+	masterWSServerCount := 0
+	var wsServer *WSServer = nil
+	var err error = nil
+	for _, server := range WSServers {
+		if server.Type == WSServerTypes["master"] {
+			masterWSServerCount++
+			if masterWSServerCount > 1 {
+				err = fmt.Errorf("websocket clustering requires only one master websocket server")
+				wsServer = nil
+				break
+			}
+			wsServer = &server
+		}
+	}
+	if err == nil && wsServer == nil {
+		err = fmt.Errorf("one master websocket server is required for websocket clustering")
+	}
+	return wsServer, err
+}
+
+// Proporciona una conexion websocket con el servidor mas optimo en terminos de carga de trabajo (considerando como parametro de carga de trabajo el numero de conexiones websocket abiertas con dicho servidor)
+func GetWSServerConnWithLessWorkload() (*websocket.Conn, error) {
+	weights := []*int{}
+	cliConnections := []*websocket.Conn{}
+	for _, server := range WSServers {
+		if server.Type == WSServerTypes["master"] {
+			n := len(Connections)
+			weights = append(weights, &n)
+			cliConnections = append(cliConnections, nil)
+			continue
+		}
+		cliConn, _, err := websocket.DefaultDialer.Dial(server.BuildWSConnectionURL(), nil)
+		if err != nil {
+			return nil, err
+		}
+		cliConnections = append(cliConnections, cliConn)
+
+		c := make(chan error)
+		wg := sync.WaitGroup{}
+		var weight int
+		var chanErr error = nil
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := cliConn.WriteJSON(WSMessage{
+				Type: MessageTypes["weight"],
+				Body: nil,
+			}); err != nil {
+				c <- err
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var m WeigthMsgBody
+			if err := cliConn.ReadJSON(&m); err != nil {
+				c <- err
+				return
+			}
+			weight = m.Weigth
+		}()
+
+		go func() {
+			chanErr = <-c
+			wg.Done() // si un error es enviado al canal, el contador del wait group debe bajar a cero para pasar el wait
+		}()
+
+		wg.Wait()
+		close(c) // cerrar el canal cuando las dos goroutines terminen (o bien cuando un error se introduzca en el canal y por lo tanto se agregue otro punto al contador del waitgroup)
+
+		if chanErr != nil {
+			weights = append(weights, nil)
+		} else {
+			weights = append(weights, &weight)
+		}
+	}
+	indexOfConnection := GetIndexOfMinorIntPointer(weights)
+	if indexOfConnection == -1 {
+		return nil, fmt.Errorf("error determining the most optimal connection for routing")
+	}
+	cliConn := cliConnections[indexOfConnection]
+	// Cerrar todas las conexiones del slice menos la conexion optima
+	for i, eachCliConn := range cliConnections {
+		if i != indexOfConnection {
+			eachCliConn.Close()
+		}
+	}
+	return cliConn, nil
 }
 
 // Elimina la conexion del slice de conexiones y la cierra
@@ -488,15 +680,10 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 		}()
 		for {
 			var m WSMessage
-			err := conn.ReadJSON(&m)
-			if err != nil {
+			if err := conn.ReadJSON(&m); err != nil {
 				fmt.Println(err)
 				break
 			}
-
-			// Comprobar las conexiones cada vez que se envia un mensaje
-			fmt.Printf("%v\n", Connections)
-
 			if m.Type == MessageTypes["guest"] {
 				if body, ok := m.Body.(string); ok {
 					var guest GuestMsgBody
@@ -783,11 +970,106 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					fmt.Println(err)
 					break
 				}
+			} else if m.Type == MessageTypes["weight"] {
+				n := len(Connections)
+				wRes := WeigthMsgBody{
+					Weigth: n,
+				}
+				if err := conn.WriteJSON(WSMessage{
+					Type: MessageTypes["weight"],
+					Body: wRes,
+				}); err != nil {
+					fmt.Println(err)
+					break
+				}
 			} else {
 				if err := conn.WriteJSON(NewErrorMessage("invalid message type")); err != nil {
 					fmt.Println(err)
 					break
 				}
+			}
+		}
+	}
+}
+
+// Middleware encargado del encaminamiento de mensajes
+type WSMessageRouterMid struct {
+	Next func(conn *websocket.Conn) http.HandlerFunc
+}
+
+func (m WSMessageRouterMid) Handle(conn *websocket.Conn) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if Config["wsServerType"] != WSServerTypes["master"] {
+			m.Next(conn).ServeHTTP(w, r)
+			return
+		}
+		// Conexion con el servidor websocket esclavo
+		slaveConn, err := GetWSServerConnWithLessWorkload()
+		if err != nil {
+			fmt.Println("error proveniente al no poder conectarse con el esclavo")
+			if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+				fmt.Println(err)
+				return
+			}
+			return
+		}
+		// Si el puntero de conexion con el esclavo es nil, significa que que la opcion mas optima no es re-encaminar el mensaje si no que el servidor maestro procese la peticion websocket.
+		if slaveConn == nil {
+			m.Next(conn).ServeHTTP(w, r)
+			return
+		}
+
+		for {
+			// Leer mensajes de la conexion websocket del cliente usuaro (cliente web)
+			var cliReqMsg WSMessage
+			if err := conn.ReadJSON(&cliReqMsg); err != nil {
+				fmt.Println(err)
+				break
+			}
+			// Re-encaminar mismo mensaje a la conexion con el servidor esclavo mas optimo
+			c := make(chan error)
+			wg := sync.WaitGroup{}
+			var slaveResMsg WSMessage
+			var chanErr error = nil
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := slaveConn.WriteJSON(cliReqMsg); err != nil {
+					c <- err
+				}
+			}()
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := slaveConn.ReadJSON(&slaveResMsg); err != nil {
+					c <- err
+				}
+			}()
+			go func() {
+				chanErr = <-c
+				wg.Done()
+			}()
+
+			wg.Wait()
+			close(c)
+
+			// Si sucede un error leyendo o escribiendo en la conexion del esclavo, abandonar la idea de re-encaminamiento cerrando la conexion con el esclavo, enviando un mensaje informativo al cliente usuario (cliente web) y por ultimo pasar las riendas al siguiente middleware.
+			if chanErr != nil {
+				slaveConn.Close()
+				if err := conn.WriteJSON(NewErrorMessage("routing of websocket messages was not possible, the master server will take over")); err != nil {
+					fmt.Println(err)
+					return
+				}
+				m.Next(conn).ServeHTTP(w, r)
+				return
+			}
+
+			// Enviar mensaje de respuesta de la conexion con el servidor websocket esclavo a la conexion con el cliente usuario (cliente web)
+			if err := conn.WriteJSON(slaveResMsg); err != nil {
+				fmt.Println(err)
+				return
 			}
 		}
 	}
@@ -799,13 +1081,14 @@ type UpgraderMid struct {
 
 func (m UpgraderMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		newConn, err := upgrader.Upgrade(w, r, nil)
+		newConn, err := Upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		// Agrega la nueva conexion websocker al slice de conexiones
 		Connections = append(Connections, newConn)
+
 		m.Next(newConn).ServeHTTP(w, r)
 	}
 }
@@ -831,7 +1114,36 @@ func (m DatabaseMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 }
 
 func main() {
-	db, err := Connect("./database.db")
+	port, ok := Config["defaultPort"].(string)
+	if !ok {
+		fmt.Printf("value `%v` for configuracion parameter `defaultPort` is invalid\n", Config["defaultPort"])
+		return
+	}
+	if len(os.Args) > 1 {
+		port = os.Args[1]
+	}
+	if len(os.Args) > 2 {
+		// En caso de que el usuario lo especifique a la hora de ejecutar el programa, puede indicar si el servidor se ejecutara como esclavo o maestro.
+		t := os.Args[2]
+		if t != "master" && t != "slave" {
+			fmt.Printf("value `%v` for configuracion parameter `wsServerType` is invalid\n", Config["wsServerType"])
+			return
+		}
+		Config["wsServerType"] = WSServerTypes[t]
+	}
+
+	// Comprobar que el cluster de servidores tenga un unico servidor maestro. De lo contrario tirara un panic.
+	if masterWSServer, err := GetMasterWSServer(); err != nil || masterWSServer == nil {
+		fmt.Println(err)
+		return
+	}
+
+	dbPath, ok := Config["databasePath"].(string)
+	if !ok {
+		fmt.Printf("value `%v` for configuracion parameter `databasePath` is invalid\n", Config["databasePath"])
+		return
+	}
+	db, err := Connect(dbPath)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -848,8 +1160,12 @@ func main() {
 			return DatabaseMid{
 				DB: db,
 				Next: func(conn *websocket.Conn) http.HandlerFunc {
-					return WSHandler{
-						DB: db,
+					return WSMessageRouterMid{
+						Next: func(conn *websocket.Conn) http.HandlerFunc {
+							return WSHandler{
+								DB: db,
+							}.Handle(conn)
+						},
 					}.Handle(conn)
 				},
 			}.Handle(conn)
@@ -860,8 +1176,8 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
-	fmt.Println("Server running on 3000")
-	if err := http.ListenAndServe(":3000", nil); err != nil {
+	fmt.Printf("Server running on %s\n", port)
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), nil); err != nil {
 		fmt.Println(err)
 		return
 	}
