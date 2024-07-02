@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/gorilla/websocket"
 	"github.com/mattn/go-sqlite3"
@@ -143,14 +145,57 @@ type GuestMsgBody struct {
 
 // Tipos relacionados con sistema de balanceo de carga ------
 
+// Representacion de un servidor websocket
 type WSServer struct {
-	Type    int
-	Address string
-	Port    string
+	Type int
+	IP   string
+	Port string
+}
+
+func (wss WSServer) BuildAddress() string {
+	return fmt.Sprintf("%s:%s", wss.IP, wss.Port)
 }
 
 func (wss WSServer) BuildWSConnectionURL() string {
-	return fmt.Sprintf("ws://%s:%s", wss.Address, wss.Port)
+	return fmt.Sprintf("ws://%s/ws", wss.BuildAddress())
+}
+
+// Errores genericos
+
+type ErrorWhileClosingFile struct {
+	Message string
+}
+
+func (e ErrorWhileClosingFile) Error() string {
+	return fmt.Sprintf("ErrorWhileClosingFile: %s", e.Message)
+}
+
+type ErrorWhileRemovingFile struct {
+	Message string
+}
+
+func (e ErrorWhileRemovingFile) Error() string {
+	return fmt.Sprintf("ErrorWhileRemovingFile: %s", e.Message)
+}
+
+// Errores relacionados con el lockfile (mecanica de evitar varias instancias del programa al mismo tiempo) ------
+
+// Error retornado por la funcion `PreventRunningMultipleTimes` en caso de no poder desbloquer el lockfile.
+type ErrorDueUnlockingLockfile struct {
+	Message string
+}
+
+func (e ErrorDueUnlockingLockfile) Error() string {
+	return fmt.Sprintf("ErrroDueUnlockingLockfile: %s", e.Message)
+}
+
+// Error retornado por la funcion `PreventRunningMultipleTimes` en caso de que existen multiples instancias del programa al mismo tiempo
+type ErrorForSeveralProcessInstances struct {
+	Message string
+}
+
+func (e ErrorForSeveralProcessInstances) Error() string {
+	return fmt.Sprintf("ErrorForSeveralProcessInstances: %s", e.Message)
 }
 
 // Configuracion general para servidor ------
@@ -171,14 +216,14 @@ var Config = map[string]any{
 
 var WSServers = []WSServer{
 	{
-		Type:    WSServerTypes["master"],
-		Address: "172.28.118.33",
-		Port:    "3000",
+		Type: WSServerTypes["master"],
+		IP:   "172.28.118.33",
+		Port: "3000",
 	},
 	{
-		Type:    WSServerTypes["slave"],
-		Address: "172.28.118.33",
-		Port:    "3131",
+		Type: WSServerTypes["slave"],
+		IP:   "172.28.118.33",
+		Port: "3131",
 	},
 }
 
@@ -242,6 +287,38 @@ func GetIndexOfMinorIntPointer(numbers []*int) int {
 	}
 
 	return indexOfLower
+}
+
+// Funcion encargada de asegurarse de que el programa se ejecuta una sola vez por maquina. Esto previene problemas a la hora de identificar a un servidor websocket maestro en el upgrader de los servidores esclavos.
+func Lock(processURL string, lockfilePath string, c chan struct{}) error {
+	// Abrir el lockfile
+	lockFile, err := os.OpenFile(lockfilePath, os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		return err
+	}
+
+	// Bloquer el lockfile
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return ErrorForSeveralProcessInstances{fmt.Sprintf("there is already an instance of this process running at %s", processURL)}
+	}
+
+	<-c // Cuando se termine de leer el canal (cuya informacion no tiene interes intrinseco)
+	close(c)
+
+	// Desbloquear el lockfile
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		return ErrorDueUnlockingLockfile{err.Error()}
+	}
+	// Cerrar el archivo lockfile
+	if err := lockFile.Close(); err != nil {
+		return ErrorWhileClosingFile{err.Error()}
+	}
+	// Borrar el archivo lockfile
+	if err := os.Remove(lockfilePath); err != nil {
+		return ErrorWhileRemovingFile{err.Error()}
+	}
+
+	return nil
 }
 
 // Funciones relacionadas con los usuarios ------
@@ -543,8 +620,11 @@ var Upgrader = websocket.Upgrader{
 		if Config["wsServerType"] == WSServerTypes["slave"] {
 			// Es imposible que retorne un error porque al principio de la aplicacion se hace una comprobacion de la configuracion de los WSServers tirando un panic en caso de fallo
 			masterWSServer, _ := GetMasterWSServer()
-			r.URL.Port()
-			return r.RemoteAddr == fmt.Sprintf("%s:%s", masterWSServer.Address, masterWSServer.Port)
+			rhost, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				return false
+			}
+			return rhost == masterWSServer.IP
 		}
 		// Si el servidor es maestro entonces admide conexiones websocket desde cualquier sitio
 		return true
@@ -583,6 +663,7 @@ func GetWSServerConnWithLessWorkload() (*websocket.Conn, error) {
 			cliConnections = append(cliConnections, nil)
 			continue
 		}
+		// TODO: Establecer conexion con el servidor esclavo en un puerto de conexion determinado. Util para que el esclavo identifique en el upgrader que el intento de conexion procede de <ip maestro>:<puerto de conexion ws maestro>
 		cliConn, _, err := websocket.DefaultDialer.Dial(server.BuildWSConnectionURL(), nil)
 		if err != nil {
 			return nil, err
@@ -1015,6 +1096,10 @@ func (m WSMessageRouterMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 		}
 		// Si el puntero de conexion con el esclavo es nil, significa que que la opcion mas optima no es re-encaminar el mensaje si no que el servidor maestro procese la peticion websocket.
 		if slaveConn == nil {
+			if err := conn.WriteJSON(NewErrorMessage("routing of websocket messages was not possible, the master server will take over")); err != nil {
+				fmt.Println(err)
+				return
+			}
 			m.Next(conn).ServeHTTP(w, r)
 			return
 		}
@@ -1114,6 +1199,7 @@ func (m DatabaseMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 }
 
 func main() {
+	// Configuracion del servidor mediante parametros en la ejecucion del programa
 	port, ok := Config["defaultPort"].(string)
 	if !ok {
 		fmt.Printf("value `%v` for configuracion parameter `defaultPort` is invalid\n", Config["defaultPort"])
@@ -1126,11 +1212,30 @@ func main() {
 		// En caso de que el usuario lo especifique a la hora de ejecutar el programa, puede indicar si el servidor se ejecutara como esclavo o maestro.
 		t := os.Args[2]
 		if t != "master" && t != "slave" {
-			fmt.Printf("value `%v` for configuracion parameter `wsServerType` is invalid\n", Config["wsServerType"])
+			fmt.Printf("value `%v` for configuracion parameter `wsServerType` is invalid\n", t)
 			return
 		}
 		Config["wsServerType"] = WSServerTypes[t]
 	}
+
+	// Canal responsable de desbloquear la ejecucion de nuevas instancias del programa
+	lockerr := make(chan error)
+	unlocker := make(chan struct{})
+	defer func() {
+		unlocker <- struct{}{}
+	}()
+	// Bloqueador de instancias de programa
+	go func() {
+		if err := Lock(WSServer{IP: "localhost", Port: port}.BuildWSConnectionURL(), "/home/alvaro/dist/lockfile.lock", unlocker); err != nil {
+			lockerr <- err
+		}
+	}()
+	// Leer en goroutine el canal de errores del bloqueador
+	go func() {
+		for err := range lockerr {
+			panic(err)
+		}
+	}()
 
 	// Comprobar que el cluster de servidores tenga un unico servidor maestro. De lo contrario tirara un panic.
 	if masterWSServer, err := GetMasterWSServer(); err != nil || masterWSServer == nil {
@@ -1176,7 +1281,7 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
-	fmt.Printf("Server running on %s\n", port)
+	fmt.Printf("server running on %s\n", port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), nil); err != nil {
 		fmt.Println(err)
 		return
