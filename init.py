@@ -1,72 +1,89 @@
-import sqlite3
+# script de inicializacion de base de datos postgre
+
+import psycopg2
 import bcrypt
 
-# Crea el archivo
-open("./database.db", "w")
 
-conn = sqlite3.connect("./database.db")
+def connect():
+    try:
+        # Conexion en modo desarrollo
+        conn = psycopg2.connect(
+            dbname="gowsauthv2",
+            user="postgres",
+            password="root",
+            host="localhost",
+            port="5432",
+        )
+        return conn
+    except Exception as error:
+        raise Exception(f"There has an error connecting to database: {error}")
 
-conn.execute("BEGIN;")
 
-conn.execute("""
-DROP TABLE IF EXISTS users;
-""")
+def main():
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("""DROP TABLE IF EXISTS users;""")
+    cursor.execute("""DROP TABLE IF EXISTS messages;""")
+    cursor.execute(
+        """
+                   CREATE TABLE users (
+                     user_id SERIAL NOT NULL PRIMARY KEY,
+                     username VARCHAR(32) NOT NULL UNIQUE,
+                     password VARCHAR(255) NOT NULL,
+                     firstname VARCHAR(32) NOT NULL,
+                     lastname VARCHAR(32) NOT NULL,
+                     admin BOOLEAN NOT NULL DEFAULT FALSE
+                   );
+                   """
+    )
+    cursor.execute(
+        """
+                   CREATE TABLE messages (
+                     message_id SERIAL NOT NULL PRIMARY KEY,
+                     owner INT NOT NULL,
+                     message TEXT NOT NULL,
+                     FOREIGN KEY (owner) REFERENCES users (user_id) ON DELETE CASCADE
+                   );
+                   """
+    )
 
-conn.execute("""
-             DROP TABLE IF EXISTS messages;
-             """)
+    salt = bcrypt.gensalt(16)
+    hashed_password = bcrypt.hashpw(password=b"pass1", salt=salt).decode("utf-8")
+    cursor.execute(
+        """
+        INSERT INTO users (username, password, firstname, lastname, admin) VALUES (%s, %s, %s, %s, %s);
+    """,
+        ("user1", hashed_password, "paco", "sanz", True),
+    )
 
-conn.execute("""
-CREATE TABLE users (
-  user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL,
-  password TEXT NOT NULL,
-  firstname TEXT NOT NULL,
-  lastname TEXT NOT NULL,
-  admin INTEGER NOT NULL
-);
-""")
+    cursor.execute(
+        """
+                   SELECT * FROM users WHERE username = 'user1'
+                   """
+    )
+    users = cursor.fetchall()
 
-conn.execute("""
-CREATE TABLE messages (
-  message_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  owner INTEGER NOT NULL,
-  message TEXT NOT NULL
-);
-""")
+    user_id = users[0][0]
 
-salt = bcrypt.gensalt(16)
-hashed_password = bcrypt.hashpw(password=b"pass1", salt=salt).decode("utf-8")
+    cursor.execute(
+        """
+                INSERT INTO messages (owner, message) VALUES (%s, %s);
+                """,
+        (user_id, "hello world"),
+    )
 
-conn.execute("""
-INSERT INTO users (username, password, firstname, lastname, admin) VALUES (?, ?, ?, ?, ?);
-""", ("user1", hashed_password, "paco", "sanz", 0))
+    conn.commit()
 
-cursor = conn.execute("""
-             SELECT user_id FROM users WHERE username = "user1"
-             """)
+    cursor.execute(
+        """
+                   SELECT * FROM messages;
+                   """
+    )
+    messages = cursor.fetchall()
 
-rows = cursor.fetchall()
-user_id = rows[0][0]
+    print(users)
+    print(messages)
 
-conn.execute("""
-             INSERT INTO messages (owner, message) VALUES (?, ?)
-             """, (user_id, "hello world"))
 
-conn.execute("""
-COMMIT;
-""")
-
-# Mostrar todos los usuarios
-cursor = conn.execute("""
-                      SELECT * FROM users WHERE TRUE
-                      """)
-rows = cursor.fetchall()
-print(rows)
-
-# Mostrar los mensaje de user1 (paco)
-cursor = conn.execute(f"""
-                      SELECT * FROM messages WHERE owner = {user_id}
-                      """)
-rows = cursor.fetchall()
-print(rows)
+if __name__ == "__main__":
+    main()
