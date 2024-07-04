@@ -248,6 +248,11 @@ var WSServers = []WSServer{
 		IP:   "172.28.118.33",
 		Port: "3000",
 	},
+	{
+		Type: WSServerTypes["slave"],
+		IP:   "172.20.167.118",
+		Port: "3131",
+	},
 }
 
 // Secreto para los jsonwebtokens (modo desarrollo)
