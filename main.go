@@ -146,9 +146,9 @@ type GuestMsgBody struct {
 
 // Representacion de un servidor websocket
 type WSServer struct {
-	Type int
-	IP   string
-	Port string
+	Type int    `json:"type"`
+	IP   string `json:"ip"`
+	Port string `json:"port"`
 }
 
 func (wss WSServer) BuildAddress() string {
@@ -162,7 +162,7 @@ func (wss WSServer) BuildWSConnectionURL() string {
 // Tipos de errores genericos ------
 
 type ErrorWhileOpeningFile struct {
-	Message string
+	Message string `json:"message"`
 }
 
 func (e ErrorWhileOpeningFile) Error() string {
@@ -170,7 +170,7 @@ func (e ErrorWhileOpeningFile) Error() string {
 }
 
 type ErrorWhileClosingFile struct {
-	Message string
+	Message string `json:"message"`
 }
 
 func (e ErrorWhileClosingFile) Error() string {
@@ -178,7 +178,7 @@ func (e ErrorWhileClosingFile) Error() string {
 }
 
 type ErrorWhileRemovingFile struct {
-	Message string
+	Message string `json:"message"`
 }
 
 func (e ErrorWhileRemovingFile) Error() string {
@@ -189,7 +189,7 @@ func (e ErrorWhileRemovingFile) Error() string {
 
 // Error retornado por la funcion `PreventRunningMultipleTimes` en caso de no poder desbloquer el lockfile.
 type ErrorDueUnlockingLockfile struct {
-	Message string
+	Message string `json:"message"`
 }
 
 func (e ErrorDueUnlockingLockfile) Error() string {
@@ -198,11 +198,23 @@ func (e ErrorDueUnlockingLockfile) Error() string {
 
 // Error retornado por la funcion `PreventRunningMultipleTimes` en caso de que existen multiples instancias del programa al mismo tiempo
 type ErrorForSeveralProcessInstances struct {
-	Message string
+	Message string `json:"message"`
 }
 
 func (e ErrorForSeveralProcessInstances) Error() string {
 	return fmt.Sprintf("ErrorForSeveralProcessInstances: %s", e.Message)
+}
+
+// Tipos de errores relacionados con WSServers
+
+type ErrorConnectingWithWSServer struct {
+	Message  string   `json:"message"`
+	WSServer WSServer `json:"ws_server"`
+}
+
+func (e ErrorConnectingWithWSServer) Error() string {
+	wssBytes, _ := json.Marshal(e.WSServer)
+	return fmt.Sprintf("ErrorConnectingWithWSServer: %s; wsserver: %s", e.Message, string(wssBytes))
 }
 
 // Tipos relacionados con la base de datos ------
@@ -685,8 +697,12 @@ func GetWSServerConnWithLessWorkload() (*websocket.Conn, error) {
 		}
 
 		cliConn, _, err := websocket.DefaultDialer.Dial(server.BuildWSConnectionURL(), nil)
+		// En caso de error, no retornar. Al retornar se sobre cargaria el servidor maestro. Es preferible introducir un peso nil y tratar de obtener el mejor wsserver sin tener en cuenta el servidor que fallo.
 		if err != nil {
-			return nil, err
+			fmt.Println(err.Error())
+			weights = append(weights, nil)
+			cliConnections = append(cliConnections, nil)
+			continue
 		}
 		cliConnections = append(cliConnections, cliConn)
 
@@ -1107,11 +1123,11 @@ func (m WSMessageRouterMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 		// Conexion con el servidor websocket esclavo
 		slaveConn, err := GetWSServerConnWithLessWorkload()
 		if err != nil {
-			fmt.Println("error proveniente al no poder conectarse con el esclavo")
 			if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
 				fmt.Println(err)
 				return
 			}
+			m.Next(conn).ServeHTTP(w, r)
 			return
 		}
 		// Si el puntero de conexion con el esclavo es nil, significa que que la opcion mas optima no es re-encaminar el mensaje si no que el servidor maestro procese la peticion websocket.
