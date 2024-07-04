@@ -1247,7 +1247,7 @@ func main() {
 		unlocker <- struct{}{}
 	}()
 	// Bloqueador de instancias de programa
-	go Lock(port, "/home/alvaro/dist/lockfile.lock", unlocker)
+	go Lock(port, "./lockfile.lock", unlocker)
 
 	_, ok = Config["wsServerType"].(int)
 	if !ok {

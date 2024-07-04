@@ -1,11 +1,17 @@
 FROM golang:latest
 
-RUN mkdir -p /home/app
+RUN mkdir -p /home/app/bin
 
 WORKDIR /home/app
 
-COPY . .
+COPY ./go.* ./
+
+COPY ./main.go ./
+
+COPY ./index.html ./bin
 
 RUN go mod tidy
 
-CMD ["go", "run", "main.go"]
+RUN go build -o ./bin/main ./main.go
+
+CMD ["./bin/main"]
