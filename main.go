@@ -241,8 +241,8 @@ var WSServerTypes = map[string]int{
 // Es importante configurar independieme cada servidor para que funcione el cluster de servidores.
 var Config = map[string]any{
 	"defaultPort": "3000",
-	"dbHost":      "localhost",
-	"dbPort":      "5432", // Puerto predeterminado de postgres
+	"dbHost":      "192.168.1.2", // IP de red NAT
+	"dbPort":      "5432",        // Puerto predeterminado de postgres
 	"dbName":      "gowsauthv2",
 
 	// Credenciales de la base de datos (modo desarrollo)
@@ -257,13 +257,13 @@ var Config = map[string]any{
 var WSServers = []WSServer{
 	{
 		Type: WSServerTypes["master"],
-		IP:   "172.28.118.33",
+		IP:   "192.168.1.2",
 		Port: "3000",
 	},
 	{
 		Type: WSServerTypes["slave"],
-		IP:   "172.20.167.118",
-		Port: "3131",
+		IP:   "192.168.1.3",
+		Port: "3000",
 	},
 }
 
