@@ -1,7 +1,6 @@
 # script de inicializacion de base de datos postgre
 
 import psycopg2
-import bcrypt
 
 
 def connect():
@@ -22,8 +21,8 @@ def connect():
 def main():
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("""DROP TABLE IF EXISTS users;""")
     cursor.execute("""DROP TABLE IF EXISTS messages;""")
+    cursor.execute("""DROP TABLE IF EXISTS users;""")
     cursor.execute(
         """
                    CREATE TABLE users (
@@ -47,13 +46,13 @@ def main():
                    """
     )
 
-    salt = bcrypt.gensalt(16)
-    hashed_password = bcrypt.hashpw(password=b"pass1", salt=salt).decode("utf-8")
+    cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+
     cursor.execute(
         """
-        INSERT INTO users (username, password, firstname, lastname, admin) VALUES (%s, %s, %s, %s, %s);
+        INSERT INTO users (username, password, firstname, lastname, admin) VALUES (%s, crypt('pass1', gen_salt('bf')), %s, %s, %s);
     """,
-        ("user1", hashed_password, "paco", "sanz", True),
+        ("user1", "paco", "sanz", True),
     )
 
     cursor.execute(

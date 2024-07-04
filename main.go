@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,7 +12,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/websocket"
-	"github.com/mattn/go-sqlite3"
+	_ "github.com/lib/pq"
 	"github.com/panprogramadorgh/goquickjwt/pkg/jwt"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -67,7 +66,7 @@ type UserPayload struct {
 	Password  string `json:"password"`
 	Firstname string `json:"firstname"`
 	Lastname  string `json:"lastname"`
-	Admin     int    `json:"admin"`
+	Admin     bool   `json:"admin"`
 }
 
 // Estructura de los claims para los JWT
@@ -160,7 +159,15 @@ func (wss WSServer) BuildWSConnectionURL() string {
 	return fmt.Sprintf("ws://%s/ws", wss.BuildAddress())
 }
 
-// Errores genericos
+// Tipos de errores genericos ------
+
+type ErrorWhileOpeningFile struct {
+	Message string
+}
+
+func (e ErrorWhileOpeningFile) Error() string {
+	return fmt.Sprintf("ErrorWhileOpeningFile: %s", e.Message)
+}
 
 type ErrorWhileClosingFile struct {
 	Message string
@@ -178,7 +185,7 @@ func (e ErrorWhileRemovingFile) Error() string {
 	return fmt.Sprintf("ErrorWhileRemovingFile: %s", e.Message)
 }
 
-// Errores relacionados con el lockfile (mecanica de evitar varias instancias del programa al mismo tiempo) ------
+// Tipos de errores relacionados con el lockfile (mecanica de evitar varias instancias del programa al mismo tiempo) ------
 
 // Error retornado por la funcion `PreventRunningMultipleTimes` en caso de no poder desbloquer el lockfile.
 type ErrorDueUnlockingLockfile struct {
@@ -198,6 +205,20 @@ func (e ErrorForSeveralProcessInstances) Error() string {
 	return fmt.Sprintf("ErrorForSeveralProcessInstances: %s", e.Message)
 }
 
+// Tipos relacionados con la base de datos ------
+
+type DBConnInfo interface {
+	GetConnectionURL() string
+}
+
+type PostgresConnInfo struct {
+	Host         string
+	Port         string
+	DatabaseName string
+	Username     string
+	Password     string
+}
+
 // Configuracion general para servidor ------
 
 var WSServerTypes = map[string]int{
@@ -207,8 +228,15 @@ var WSServerTypes = map[string]int{
 
 // Es importante configurar independieme cada servidor para que funcione el cluster de servidores.
 var Config = map[string]any{
-	"defaultPort":  "3000",
-	"databasePath": "/home/alvaro/dist/database.db",
+	"defaultPort": "3000",
+	"dbHost":      "localhost",
+	"dbPort":      "5432", // Puerto predeterminado de postgres
+	"dbName":      "gowsauthv2",
+
+	// Credenciales de la base de datos (modo desarrollo)
+	"dbUsername": "postgres", // Usuario predeterminado
+	"dbPassword": "root",
+
 	"wsServerType": WSServerTypes["master"],
 }
 
@@ -219,11 +247,6 @@ var WSServers = []WSServer{
 		Type: WSServerTypes["master"],
 		IP:   "172.28.118.33",
 		Port: "3000",
-	},
-	{
-		Type: WSServerTypes["slave"],
-		IP:   "172.28.118.33",
-		Port: "3131",
 	},
 }
 
@@ -289,17 +312,18 @@ func GetIndexOfMinorIntPointer(numbers []*int) int {
 	return indexOfLower
 }
 
-// Funcion encargada de asegurarse de que el programa se ejecuta una sola vez por maquina. Esto previene problemas a la hora de identificar a un servidor websocket maestro en el upgrader de los servidores esclavos.
-func Lock(processURL string, lockfilePath string, c chan struct{}) error {
+// Funcion encargada de asegurarse de que el programa se ejecuta una sola vez por maquina (o por lo menos en un mismo interfaz, en caso de haber varios en la misma maquina). Esto previene problemas a la hora de identificar a un servidor websocket maestro por IP en el upgrader de los servidores esclavos.
+func Lock(servicePort string, lockfilePath string, c chan struct{}) {
 	// Abrir el lockfile
 	lockFile, err := os.OpenFile(lockfilePath, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
-		return err
+		panic(ErrorWhileOpeningFile{err.Error()})
 	}
 
 	// Bloquer el lockfile
+	processURL := WSServer{IP: "localhost", Port: servicePort}.BuildWSConnectionURL()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return ErrorForSeveralProcessInstances{fmt.Sprintf("there is already an instance of this process running at %s", processURL)}
+		panic(ErrorForSeveralProcessInstances{fmt.Sprintf("there is already an instance of this process running at %s", processURL)})
 	}
 
 	<-c // Cuando se termine de leer el canal (cuya informacion no tiene interes intrinseco)
@@ -307,18 +331,16 @@ func Lock(processURL string, lockfilePath string, c chan struct{}) error {
 
 	// Desbloquear el lockfile
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
-		return ErrorDueUnlockingLockfile{err.Error()}
+		panic(ErrorDueUnlockingLockfile{err.Error()})
 	}
 	// Cerrar el archivo lockfile
 	if err := lockFile.Close(); err != nil {
-		return ErrorWhileClosingFile{err.Error()}
+		panic(ErrorWhileClosingFile{err.Error()})
 	}
 	// Borrar el archivo lockfile
 	if err := os.Remove(lockfilePath); err != nil {
-		return ErrorWhileRemovingFile{err.Error()}
+		panic(ErrorWhileRemovingFile{err.Error()})
 	}
-
-	return nil
 }
 
 // Funciones relacionadas con los usuarios ------
@@ -332,12 +354,12 @@ func (p *UserPayload) HashPassword() error {
 	return nil
 }
 
-func VerifyPassword(hash string, password string) bool {
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return false
-	}
-	return true
-}
+// func VerifyPassword(hash string, password string) bool {
+// 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+// 		return false
+// 	}
+// 	return true
+// }
 
 func (p JwtPayload) NewToken(secret string) (string, error) {
 	newP := jwt.Payload{
@@ -384,7 +406,7 @@ status == 2 - err.Error() == internal server error
 func AuthenticateUser(db *sql.DB, c LoginMsgReqBody) (int, string, error) {
 	query :=
 		`
-	SELECT * FROM users WHERE username = ? AND VERIFY(password, ?)
+	SELECT * FROM users WHERE username = $1 AND crypt($2, password) = password;
 	`
 	row := db.QueryRow(query, c.Username, c.Password)
 
@@ -414,8 +436,6 @@ func RegisterUser(db *sql.DB, p UserPayload) error {
 		return fmt.Errorf("invalid firstname for new user")
 	} else if strings.Trim(p.Lastname, " ") == "" {
 		return fmt.Errorf("invalid lastname for new user")
-	} else if p.Admin != 0 && p.Admin != 1 {
-		return fmt.Errorf("%+v is invalid value for admin field", p.Admin)
 	}
 
 	_, err := GetUserByUsername(db, p.Username)
@@ -426,13 +446,9 @@ func RegisterUser(db *sql.DB, p UserPayload) error {
 	// Insertar nuevo usuario
 	query :=
 		`
-	INSERT INTO users (username, password, firstname, lastname, admin) VALUES (?, ?, ?, ?, ?)
+	INSERT INTO users (username, password, firstname, lastname, admin) VALUES ($1, crypt($2, gen_salt('bf')), $3, $4, $5)
 	`
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(p.Password), 16)
-	if err != nil {
-		return err
-	}
-	if _, err := db.Exec(query, p.Username, hashedPassword, p.Firstname, p.Lastname, p.Admin); err != nil {
+	if _, err := db.Exec(query, p.Username, p.Password, p.Firstname, p.Lastname, p.Admin); err != nil {
 		return err
 	}
 	return nil
@@ -441,7 +457,7 @@ func RegisterUser(db *sql.DB, p UserPayload) error {
 func GetUserByUsername(db *sql.DB, u string) (*User, error) {
 	query :=
 		`
-	SELECT * FROM users WHERE username = ?
+	SELECT * FROM users WHERE username = $1
 	`
 	row := db.QueryRow(query, u)
 	var (
@@ -450,7 +466,7 @@ func GetUserByUsername(db *sql.DB, u string) (*User, error) {
 		password,
 		firstname,
 		lastname string
-		admin int
+		admin bool
 	)
 	if err := row.Scan(&userID, &username, &password, &firstname, &lastname, &admin); err != nil {
 		return nil, err
@@ -471,7 +487,7 @@ func GetUserByUsername(db *sql.DB, u string) (*User, error) {
 func GetUserById(db *sql.DB, id int) (*User, error) {
 	query :=
 		`
-	SELECT * FROM users WHERE user_id = ?
+	SELECT * FROM users WHERE user_id = $1
 	`
 	row := db.QueryRow(query, id)
 	var (
@@ -480,7 +496,7 @@ func GetUserById(db *sql.DB, id int) (*User, error) {
 		password,
 		firstname,
 		lastname string
-		admin int
+		admin bool
 	)
 	if err := row.Scan(&userID, &username, &password, &firstname, &lastname, &admin); err != nil {
 		return nil, err
@@ -515,7 +531,7 @@ func GetAllUsers(db *sql.DB) ([]User, error) {
 			password,
 			firstname,
 			lastname string
-			admin int
+			admin bool
 		)
 		if err := rows.Scan(&userID, &username, &password, &firstname, &lastname, &admin); err != nil {
 			return nil, err
@@ -550,7 +566,7 @@ func NewErrorMessage(errBody string) WSMessage {
 func SaveMessage(db *sql.DB, sRes ShoutMsgResBody) error {
 	query :=
 		`
-	INSERT INTO messages (owner, message) VALUES (?, ?)
+	INSERT INTO messages (owner, message) VALUES ($1, $2)
 	`
 	_, err := db.Exec(query, sRes.Owner, sRes.Message)
 	return err
@@ -586,29 +602,28 @@ func GetAllMessages(db *sql.DB) ([]Message, error) {
 	return messages, nil
 }
 
-// Funciones de la base de datos ------
+// Utilidades de la base de datos ------
 
-func Connect(url string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", url)
+func (p PostgresConnInfo) GetConnectionURL() string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", p.Username, p.Password, p.Host, p.Port, p.DatabaseName)
+}
+
+func Connect(connInfo DBConnInfo) (*sql.DB, error) {
+	db, err := sql.Open("postgres", connInfo.GetConnectionURL())
 	if err != nil {
 		return nil, err
 	}
 	return db, nil
 }
 
-func RegisterSQLFunc(db *sql.DB, n string, f any) error {
-	conn, err := db.Conn(context.Background())
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if err := conn.Raw(func(driverConn any) error {
-		sqliteConn := driverConn.(*sqlite3.SQLiteConn)
-		return sqliteConn.RegisterFunc(n, f, true)
-	}); err != nil {
-		return err
-	}
-	return nil
+// Es necesario registrar la extension crypto de postgres para la validacion de la contraseña hasheada con la funcion crypto (y tambien la funcion gen_salt en caso de introducir un nuevo usuario en la base de datos)
+func RegisterCryptoExtension(db *sql.DB) error {
+	query :=
+		`
+	CREATE EXTENSION IF NOT EXISTS pgcrypto;
+	`
+	_, err := db.Exec(query)
+	return err
 }
 
 // Utilidades websocket ------
@@ -663,7 +678,7 @@ func GetWSServerConnWithLessWorkload() (*websocket.Conn, error) {
 			cliConnections = append(cliConnections, nil)
 			continue
 		}
-		// TODO: Establecer conexion con el servidor esclavo en un puerto de conexion determinado. Util para que el esclavo identifique en el upgrader que el intento de conexion procede de <ip maestro>:<puerto de conexion ws maestro>
+
 		cliConn, _, err := websocket.DefaultDialer.Dial(server.BuildWSConnectionURL(), nil)
 		if err != nil {
 			return nil, err
@@ -879,8 +894,8 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-					if user.Admin != 1 {
-						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value 1 for admin field")); err != nil {
+					if !user.Admin {
+						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value true for admin field")); err != nil {
 							fmt.Println(err)
 							break
 						}
@@ -937,8 +952,8 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-					if user.Admin != 1 {
-						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value 1 for admin field")); err != nil {
+					if !user.Admin {
+						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value true for admin field")); err != nil {
 							fmt.Println(err)
 							break
 						}
@@ -1096,10 +1111,6 @@ func (m WSMessageRouterMid) Handle(conn *websocket.Conn) http.HandlerFunc {
 		}
 		// Si el puntero de conexion con el esclavo es nil, significa que que la opcion mas optima no es re-encaminar el mensaje si no que el servidor maestro procese la peticion websocket.
 		if slaveConn == nil {
-			if err := conn.WriteJSON(NewErrorMessage("routing of websocket messages was not possible, the master server will take over")); err != nil {
-				fmt.Println(err)
-				return
-			}
 			m.Next(conn).ServeHTTP(w, r)
 			return
 		}
@@ -1208,34 +1219,33 @@ func main() {
 	if len(os.Args) > 1 {
 		port = os.Args[1]
 	}
-	if len(os.Args) > 2 {
-		// En caso de que el usuario lo especifique a la hora de ejecutar el programa, puede indicar si el servidor se ejecutara como esclavo o maestro.
-		t := os.Args[2]
-		if t != "master" && t != "slave" {
-			fmt.Printf("value `%v` for configuracion parameter `wsServerType` is invalid\n", t)
-			return
-		}
-		Config["wsServerType"] = WSServerTypes[t]
-	}
 
 	// Canal responsable de desbloquear la ejecucion de nuevas instancias del programa
-	lockerr := make(chan error)
 	unlocker := make(chan struct{})
 	defer func() {
 		unlocker <- struct{}{}
 	}()
 	// Bloqueador de instancias de programa
-	go func() {
-		if err := Lock(WSServer{IP: "localhost", Port: port}.BuildWSConnectionURL(), "/home/alvaro/dist/lockfile.lock", unlocker); err != nil {
-			lockerr <- err
+	go Lock(port, "/home/alvaro/dist/lockfile.lock", unlocker)
+
+	_, ok = Config["wsServerType"].(int)
+	if !ok {
+		fmt.Printf("value `%v` for configuracion parameter `defaultPort` is invalid\n", Config["wsServerType"])
+		return
+	}
+	var wsServerType string = "master"
+	if Config["wsServerType"] == 1 {
+		wsServerType = "slave"
+	}
+	if len(os.Args) > 2 {
+		// En caso de que el usuario lo especifique a la hora de ejecutar el programa, puede indicar si el servidor se ejecutara como esclavo o maestro.
+		wsServerType = os.Args[2]
+		if wsServerType != "master" && wsServerType != "slave" {
+			fmt.Printf("value `%v` for configuracion parameter `wsServerType` is invalid\n", wsServerType)
+			return
 		}
-	}()
-	// Leer en goroutine el canal de errores del bloqueador
-	go func() {
-		for err := range lockerr {
-			panic(err)
-		}
-	}()
+		Config["wsServerType"] = WSServerTypes[wsServerType]
+	}
 
 	// Comprobar que el cluster de servidores tenga un unico servidor maestro. De lo contrario tirara un panic.
 	if masterWSServer, err := GetMasterWSServer(); err != nil || masterWSServer == nil {
@@ -1243,19 +1253,47 @@ func main() {
 		return
 	}
 
-	dbPath, ok := Config["databasePath"].(string)
-	if !ok {
-		fmt.Printf("value `%v` for configuracion parameter `databasePath` is invalid\n", Config["databasePath"])
+	dbHost, ok := Config["dbHost"].(string)
+	if !ok || strings.Trim(dbHost, " ") == "" {
+		fmt.Printf("value `%v` for configuracion parameter `dbHost` is invalid\n", Config["dbHost"])
 		return
 	}
-	db, err := Connect(dbPath)
+	dbPort, ok := Config["dbPort"].(string)
+	if !ok || strings.Trim(dbPort, " ") == "" {
+		fmt.Printf("value `%v` for configuracion parameter `dbPort` is invalid\n", Config["dbPort"])
+		return
+	}
+	dbName, ok := Config["dbName"].(string)
+	if !ok || strings.Trim(dbName, " ") == "" {
+		fmt.Printf("value `%v` for configuracion parameter `dbName` is invalid\n", Config["dbName"])
+		return
+	}
+	dbUsername, ok := Config["dbUsername"].(string)
+	if !ok || strings.Trim(dbUsername, " ") == "" {
+		fmt.Printf("value `%v` for configuracion parameter `dbUsername` is invalid\n", Config["dbUsername"])
+		return
+	}
+	dbPassword, ok := Config["dbPassword"].(string)
+	if !ok || strings.Trim(dbPassword, " ") == "" {
+		fmt.Printf("value `%v` for configuracion parameter `dbPassword` is invalid\n", Config["dbPassword"])
+		return
+	}
+
+	connInfo := PostgresConnInfo{
+		Host:         dbHost,
+		Port:         dbPort,
+		DatabaseName: dbName,
+		Username:     dbUsername,
+		Password:     dbPassword,
+	}
+	db, err := Connect(connInfo)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	defer db.Close()
 
-	if err := RegisterSQLFunc(db, "VERIFY", VerifyPassword); err != nil {
+	if err := RegisterCryptoExtension(db); err != nil {
 		fmt.Println(err)
 		return
 	}
@@ -1281,7 +1319,7 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
-	fmt.Printf("server running on %s\n", port)
+	fmt.Printf("server running on %s - %s\n", port, wsServerType)
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), nil); err != nil {
 		fmt.Println(err)
 		return
