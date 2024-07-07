@@ -28,9 +28,11 @@ type WSMessage struct {
 			"shout":    1,
 			"users":    2,
 			"messages": 3,
-			"login":    4,
-			"register": 5,
-			"error":    6,
+			"whoami":   4,
+			"login":    5,
+			"register": 6,
+			"weight":   7,
+			"error":    8,
 		}
 
 		loginMsgType := MessageTypes["login"]
@@ -122,6 +124,14 @@ type RegisterMsgReqBody UserPayload
 
 // Cuerpo de mensaje register (respuesta)
 type RegisterMsgResBody struct {
+	User User `json:"user"`
+}
+
+type WhoamiMsgReqBody struct {
+	Token string `json:"token"`
+}
+
+type WhoamiMsgResBody struct {
 	User User `json:"user"`
 }
 
@@ -241,8 +251,8 @@ var WSServerTypes = map[string]int{
 // Es importante configurar independieme cada servidor para que funcione el cluster de servidores.
 var Config = map[string]any{
 	"defaultPort": "3000",
-	"dbHost":      "192.168.1.2", // IP de red NAT
-	"dbPort":      "5432",        // Puerto predeterminado de postgres
+	"dbHost":      "localhost", // IP de red NAT
+	"dbPort":      "5432",      // Puerto predeterminado de postgres
 	"dbName":      "gowsauthv2",
 
 	// Credenciales de la base de datos (modo desarrollo)
@@ -257,14 +267,14 @@ var Config = map[string]any{
 var WSServers = []WSServer{
 	{
 		Type: WSServerTypes["master"],
-		IP:   "192.168.1.2",
+		IP:   "localhost",
 		Port: "3000",
 	},
-	{
-		Type: WSServerTypes["slave"],
-		IP:   "192.168.1.3",
-		Port: "3000",
-	},
+	// {
+	// 	Type: WSServerTypes["slave"],
+	// 	IP:   "192.168.1.3",
+	// 	Port: "3000",
+	// },
 }
 
 // Secreto para los jsonwebtokens (modo desarrollo)
@@ -276,10 +286,11 @@ var MessageTypes = map[string]int{
 	"shout":    1,
 	"users":    2,
 	"messages": 3,
-	"login":    4,
-	"register": 5,
-	"weight":   6,
-	"error":    7,
+	"whoami":   4,
+	"login":    5,
+	"register": 6,
+	"weight":   7,
+	"error":    8,
 }
 
 // Slice de conexiones websocket
@@ -996,6 +1007,53 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}); err != nil {
 						fmt.Println(err)
 						break
+					}
+					continue
+				}
+				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+					fmt.Println(err)
+					break
+				}
+			} else if m.Type == MessageTypes["whoami"] {
+				if body, ok := m.Body.(string); ok {
+					var wReq WhoamiMsgReqBody
+					if err := json.Unmarshal([]byte(body), &wReq); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					p, err := VerifyToken(wsh.DB, Secret, wReq.Token)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					user, err := GetUserById(wsh.DB, p.UserID)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					whoamiResMsg := WhoamiMsgResBody{
+						User: *user,
+					}
+					resM := WSMessage{
+						Type: MessageTypes["whoami"],
+						Body: whoamiResMsg,
+					}
+
+					if err := conn.WriteJSON(resM); err != nil {
+						fmt.Println(err)
+						continue
 					}
 					continue
 				}

@@ -10,7 +10,7 @@ def connect():
             dbname="gowsauthv2",
             user="postgres",
             password="root",
-            host="192.168.1.2",
+            host="localhost",
             port="5432",
         )
         return conn
