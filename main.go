@@ -76,6 +76,11 @@ type JwtPayload struct {
 	UserID int
 }
 
+// Cuerpo de mensajes messages (respuesta)
+type MessagesMsgBody struct {
+	Messages []Message `json:"messages"`
+}
+
 // Cuerpo de mensaje weigth (respuesta)
 type WeigthMsgBody struct {
 	Weigth int `json:"weigth"`
@@ -98,16 +103,6 @@ type UsersMsgResBody struct {
 	Users []User `json:"users"`
 }
 
-// Cuerpo de mensajes messages (respuesta)
-type MessagesMsgResBody struct {
-	Messages []Message `json:"messages"`
-}
-
-// Cuerpo de mensajes messages (solicitud)
-type MessagesMsgReqBody struct {
-	Token string `json:"token"`
-}
-
 // Cuerpo de mensaje login (solicitud)
 type LoginMsgReqBody struct {
 	Username string `json:"username"`
@@ -127,11 +122,26 @@ type RegisterMsgResBody struct {
 	User User `json:"user"`
 }
 
+// Cuerpo de mensaje whoami (solicitud)
 type WhoamiMsgReqBody struct {
 	Token string `json:"token"`
 }
 
+// Cuerpo de mensaje whoami (respuesta)
 type WhoamiMsgResBody struct {
+	User User `json:"user"`
+}
+
+// Cuerpo de mensaje whois (solicitud)
+type WhoisMsgReqBody struct {
+	// Token de sesion de un usuario autorizado
+	Token string `json:"token"`
+	// Id de usuario del que se quiere obtener infomacion
+	UserID int `json:"user_id"`
+}
+
+// Cuerpo de mensaje whois (respuesta)
+type WhoisMsgResBody struct {
 	User User `json:"user"`
 }
 
@@ -195,6 +205,14 @@ func (e ErrorWhileRemovingFile) Error() string {
 	return fmt.Sprintf("ErrorWhileRemovingFile: %s", e.Message)
 }
 
+type UnauthorizedUserError struct{}
+
+var UnauthUserErr = UnauthorizedUserError{}
+
+func (e UnauthorizedUserError) Error() string {
+	return "UnauthorizedUserError: user asociated to token is not authorized"
+}
+
 // Tipos de errores relacionados con el lockfile (mecanica de evitar varias instancias del programa al mismo tiempo) ------
 
 // Error retornado por la funcion `PreventRunningMultipleTimes` en caso de no poder desbloquer el lockfile.
@@ -226,6 +244,14 @@ func (e ErrorConnectingWithWSServer) Error() string {
 	wssBytes, _ := json.Marshal(e.WSServer)
 	return fmt.Sprintf("ErrorConnectingWithWSServer: %s; wsserver: %s", e.Message, string(wssBytes))
 }
+
+type InvalidMessageBodyError struct{}
+
+func (e InvalidMessageBodyError) Error() string {
+	return "InvalidMessageBodyError: invalid message body type"
+}
+
+var InvalidMsgBodyErr = InvalidMessageBodyError{}
 
 // Tipos relacionados con la base de datos ------
 
@@ -282,11 +308,11 @@ const Secret = "aGVsbG8gd29ybGQ="
 
 // Tipos de WSMessages
 var MessageTypes = map[string]int{
-	"guest":    0,
-	"shout":    1,
-	"users":    2,
-	"messages": 3,
-	"whoami":   4,
+	"shout":    0,
+	"users":    1,
+	"messages": 2,
+	"whoami":   3,
+	"whois":    4,
 	"login":    5,
 	"register": 6,
 	"weight":   7,
@@ -547,7 +573,7 @@ func GetAllUsers(db *sql.DB) ([]User, error) {
 		`
 	SELECT * FROM users
 	`
-	rows, err := db.Query(query, nil)
+	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -812,38 +838,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 				fmt.Println(err)
 				break
 			}
-			if m.Type == MessageTypes["guest"] {
-				if body, ok := m.Body.(string); ok {
-					var guest GuestMsgBody
-					if err := json.Unmarshal([]byte(body), &guest); err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					if strings.Trim(guest.Message, " ") == "" {
-						if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					for _, eachConn := range Connections {
-						if err := eachConn.WriteJSON(WSMessage{
-							Type: MessageTypes["guest"],
-							Body: guest,
-						}); err != nil {
-							fmt.Println(err)
-						}
-					}
-					continue
-				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
-					fmt.Println(err)
-					break
-				}
-			} else if m.Type == MessageTypes["shout"] {
+			if m.Type == MessageTypes["shout"] {
 				if body, ok := m.Body.(string); ok {
 					var sReq ShoutMsgReqBody
 					if err := json.Unmarshal([]byte(body), &sReq); err != nil {
@@ -854,7 +849,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						continue
 					}
 					if strings.Trim(sReq.Message, " ") == "" {
-						if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 							fmt.Println(err)
 							break
 						}
@@ -895,7 +890,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 
 					continue
 				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
@@ -909,7 +904,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-					// Comprobar que el usuario asociado al token tenga el valor 1 para el campo admin.
+					// Comprobar que el usuario asociado al token tenga el valor true para el campo admin.
 					p, err := VerifyToken(wsh.DB, Secret, uReq.Token)
 					if err != nil {
 						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
@@ -927,7 +922,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						continue
 					}
 					if !user.Admin {
-						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value true for admin field")); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(UnauthUserErr.Error())); err != nil {
 							fmt.Println(err)
 							break
 						}
@@ -953,44 +948,12 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 					continue
 				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
 			} else if m.Type == MessageTypes["messages"] {
-				if body, ok := m.Body.(string); ok {
-					var mReq MessagesMsgReqBody
-					if err := json.Unmarshal([]byte(body), &mReq); err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					// Comprobar que el usuario asociado al token tenga el valor 1 para la propiedad admin.
-					p, err := VerifyToken(wsh.DB, Secret, mReq.Token)
-					if err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					user, err := GetUserById(wsh.DB, p.UserID)
-					if err != nil {
-						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
-					if !user.Admin {
-						if err := conn.WriteJSON(NewErrorMessage("user associated to token has not value true for admin field")); err != nil {
-							fmt.Println(err)
-							break
-						}
-						continue
-					}
+				if m.Body == nil {
 					messages, err := GetAllMessages(wsh.DB)
 					if err != nil {
 						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
@@ -1001,7 +964,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 					if err := conn.WriteJSON(WSMessage{
 						Type: MessageTypes["messages"],
-						Body: MessagesMsgResBody{
+						Body: MessagesMsgBody{
 							Messages: messages,
 						},
 					}); err != nil {
@@ -1010,7 +973,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 					continue
 				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
@@ -1057,7 +1020,70 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 					continue
 				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
+					fmt.Println(err)
+					break
+				}
+			} else if m.Type == MessageTypes["whois"] {
+				if body, ok := m.Body.(string); ok {
+					var whoisReq WhoisMsgReqBody
+					if err := json.Unmarshal([]byte(body), &whoisReq); err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					p, err := VerifyToken(wsh.DB, Secret, whoisReq.Token)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+					tokenUser, err := GetUserById(wsh.DB, p.UserID)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					if !tokenUser.Admin {
+						if err := conn.WriteJSON(NewErrorMessage(UnauthUserErr.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					user, err := GetUserById(wsh.DB, whoisReq.UserID)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
+							fmt.Println(err)
+							break
+						}
+						continue
+					}
+
+					resM := WSMessage{
+						Type: MessageTypes["whois"],
+						Body: WhoisMsgResBody{
+							User: *user,
+						},
+					}
+
+					if err := conn.WriteJSON(resM); err != nil {
+						fmt.Println(err)
+						break
+					}
+
+					continue
+				}
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
@@ -1096,7 +1122,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 					continue
 				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
@@ -1141,7 +1167,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					}
 					continue
 				}
-				if err := conn.WriteJSON(NewErrorMessage("invalid message body")); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
