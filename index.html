@@ -73,11 +73,11 @@
       return window.alert("Connection is clossed. Reload the page to re-connect");
     const message = {
       type: messageTypes[msgType.value],
-      body: msg.value
+      body: !msg.value ? null : msg.value
     };
     console.log(message)
 
-    if (message.body && message.type !== undefined) {
+    if ((message.body === null || typeof message.body === "string") && message.type !== undefined) {
       websocket.send(JSON.stringify(message));
       setLoading(true)
     }

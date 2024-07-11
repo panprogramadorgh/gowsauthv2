@@ -153,8 +153,7 @@ type ShoutMsgReqBody struct {
 
 // Cuerpo de mensaje shout (respuesta)
 type ShoutMsgResBody struct {
-	Owner   int    `json:"owner"`
-	Message string `json:"message"`
+	Message
 }
 
 // Cuerpo de mensaje guest (solicitud & respuesta).
@@ -186,7 +185,7 @@ type ErrorWhileOpeningFile struct {
 }
 
 func (e ErrorWhileOpeningFile) Error() string {
-	return fmt.Sprintf("ErrorWhileOpeningFile: %s", e.Message)
+	return fmt.Sprintf("ErrorWhileOpeningFile: %s.", e.Message)
 }
 
 type ErrorWhileClosingFile struct {
@@ -194,7 +193,7 @@ type ErrorWhileClosingFile struct {
 }
 
 func (e ErrorWhileClosingFile) Error() string {
-	return fmt.Sprintf("ErrorWhileClosingFile: %s", e.Message)
+	return fmt.Sprintf("ErrorWhileClosingFile: %s.", e.Message)
 }
 
 type ErrorWhileRemovingFile struct {
@@ -202,7 +201,7 @@ type ErrorWhileRemovingFile struct {
 }
 
 func (e ErrorWhileRemovingFile) Error() string {
-	return fmt.Sprintf("ErrorWhileRemovingFile: %s", e.Message)
+	return fmt.Sprintf("ErrorWhileRemovingFile: %s.", e.Message)
 }
 
 type UnauthorizedUserError struct{}
@@ -210,7 +209,7 @@ type UnauthorizedUserError struct{}
 var UnauthUserErr = UnauthorizedUserError{}
 
 func (e UnauthorizedUserError) Error() string {
-	return "UnauthorizedUserError: user asociated to token is not authorized"
+	return "UnauthorizedUserError: user asociated to token is not authorized."
 }
 
 // Tipos de errores relacionados con el lockfile (mecanica de evitar varias instancias del programa al mismo tiempo) ------
@@ -221,7 +220,7 @@ type ErrorDueUnlockingLockfile struct {
 }
 
 func (e ErrorDueUnlockingLockfile) Error() string {
-	return fmt.Sprintf("ErrroDueUnlockingLockfile: %s", e.Message)
+	return fmt.Sprintf("ErrroDueUnlockingLockfile: %s.", e.Message)
 }
 
 // Error retornado por la funcion `PreventRunningMultipleTimes` en caso de que existen multiples instancias del programa al mismo tiempo
@@ -230,7 +229,7 @@ type ErrorForSeveralProcessInstances struct {
 }
 
 func (e ErrorForSeveralProcessInstances) Error() string {
-	return fmt.Sprintf("ErrorForSeveralProcessInstances: %s", e.Message)
+	return fmt.Sprintf("ErrorForSeveralProcessInstances: %s.", e.Message)
 }
 
 // Tipos de errores relacionados con WSServers
@@ -242,16 +241,27 @@ type ErrorConnectingWithWSServer struct {
 
 func (e ErrorConnectingWithWSServer) Error() string {
 	wssBytes, _ := json.Marshal(e.WSServer)
-	return fmt.Sprintf("ErrorConnectingWithWSServer: %s; wsserver: %s", e.Message, string(wssBytes))
+	return fmt.Sprintf("ErrorConnectingWithWSServer: %s. wsserver: %s.", e.Message, string(wssBytes))
 }
 
 type InvalidMessageBodyError struct{}
 
 func (e InvalidMessageBodyError) Error() string {
-	return "InvalidMessageBodyError: invalid message body type"
+	return "InvalidMessageBodyError: invalid message body type."
 }
 
 var InvalidMsgBodyErr = InvalidMessageBodyError{}
+
+// Tipos de errore relacionados con la base de datos
+
+type ErrorDueSavingMessage struct {
+	Message      string
+	WrappedError error
+}
+
+func (e ErrorDueSavingMessage) Error() string {
+	return fmt.Sprintf("ErrorDueSavingMessage: %s, undoing transaction: %s.", e.Message, e.WrappedError.Error())
+}
 
 // Tipos relacionados con la base de datos ------
 
@@ -617,13 +627,68 @@ func NewErrorMessage(errBody string) WSMessage {
 }
 
 // Funcion encargada de guardar mensajes en la base de datos
-func SaveMessage(db *sql.DB, sRes ShoutMsgResBody) error {
+func SaveMessage(db *sql.DB, owner int, message string) (*Message, error) {
+	// Iniciar transaccion
 	query :=
 		`
-	INSERT INTO messages (owner, message) VALUES ($1, $2)
+	BEGIN;
 	`
-	_, err := db.Exec(query, sRes.Owner, sRes.Message)
-	return err
+	if _, err := db.Exec(query); err != nil {
+		return nil, fmt.Errorf("no fue ")
+	}
+
+	// Insertar mensaje en la tabla messagess
+	query =
+		`
+	INSERT INTO messages (owner, message) VALUES ($1, $2);
+	`
+	_, err := db.Exec(query, owner, message)
+	if err != nil {
+		return nil, err
+	}
+
+	// Obtener mensaje recien insertado
+	query =
+		`
+	SELECT * FROM messages WHERE owner = $1 AND message = $2
+	`
+	rows, err := db.Query(query, owner, message)
+	if err != nil {
+		// Si sale mal, deshacer cambios con un rollback
+		query =
+			`
+		ROLLBACK;
+		`
+		db.Exec(query)
+		return nil, ErrorDueSavingMessage{Message: "cannot find newly saved message", WrappedError: err}
+	}
+
+	var m *Message = nil
+	for rows.Next() {
+		var curMsg Message
+		if err := rows.Scan(&curMsg.MessageID, &curMsg.Owner, &curMsg.Message); err != nil {
+			// Si sale mal, deshacer cambios con un rollback
+			query =
+				`
+			ROLLBACK;
+			`
+			db.Exec(query)
+			return nil, ErrorDueSavingMessage{Message: "cannot find newly saved message", WrappedError: err}
+		}
+		m = &curMsg
+	}
+
+	if m == nil {
+		// Si sale mal, deshacer cambios con un rollback
+		query =
+			`
+		ROLLBACK;
+		`
+		db.Exec(query)
+		return nil, ErrorDueSavingMessage{Message: "cannot find newly saved message", WrappedError: err}
+	}
+
+	return m, nil
 }
 
 // Funcion encargada de recoger todos los cuerpos de mensaje de tipo shout guardados en la base de datos
@@ -864,14 +929,11 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-					sRes := ShoutMsgResBody{
-						Owner:   p.UserID,
-						Message: sReq.Message,
-					}
 
 					// Guardar message en la base de datos
-					if err := SaveMessage(wsh.DB, sRes); err != nil {
-						if err := conn.WriteJSON(err.Error()); err != nil {
+					savedMessage, err := SaveMessage(wsh.DB, p.UserID, sReq.Message)
+					if err != nil {
+						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
 							fmt.Println(err)
 							break
 						}
@@ -882,7 +944,7 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					for _, eachConn := range Connections {
 						if err := eachConn.WriteJSON(WSMessage{
 							Type: MessageTypes["shout"],
-							Body: sRes,
+							Body: *savedMessage,
 						}); err != nil {
 							fmt.Println(err)
 						}
