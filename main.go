@@ -51,14 +51,14 @@ type WSMessage struct {
 
 // Estructura de mensaje (a guardar en la base de datos tras mandar mensaje websocket shout)
 type Message struct {
-	MessageID int    `json:"message_id"`
+	MessageID int    `json:"messageID"`
 	Owner     int    `json:"owner"`
 	Message   string `json:"message"`
 }
 
 // Estructura de usuarios
 type User struct {
-	UserID int `json:"user_id"`
+	UserID int `json:"userID"`
 	UserPayload
 }
 
@@ -137,7 +137,7 @@ type WhoisMsgReqBody struct {
 	// Token de sesion de un usuario autorizado
 	Token string `json:"token"`
 	// Id de usuario del que se quiere obtener infomacion
-	UserID int `json:"user_id"`
+	UserID int `json:"userID"`
 }
 
 // Cuerpo de mensaje whois (respuesta)
@@ -236,7 +236,7 @@ func (e ErrorForSeveralProcessInstances) Error() string {
 
 type ErrorConnectingWithWSServer struct {
 	Message  string   `json:"message"`
-	WSServer WSServer `json:"ws_server"`
+	WSServer WSServer `json:"WSServer"`
 }
 
 func (e ErrorConnectingWithWSServer) Error() string {
@@ -1096,7 +1096,12 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 						}
 						continue
 					}
-
+					if whoisReq.UserID == 0 {
+						if err := conn.WriteJSON(NewErrorMessage("invalid value for userID field")); err != nil {
+							fmt.Println(err)
+							break
+						}
+					}
 					p, err := VerifyToken(wsh.DB, Secret, whoisReq.Token)
 					if err != nil {
 						if err := conn.WriteJSON(NewErrorMessage(err.Error())); err != nil {
@@ -1234,14 +1239,22 @@ func (wsh WSHandler) Handle(conn *websocket.Conn) http.HandlerFunc {
 					break
 				}
 			} else if m.Type == MessageTypes["weight"] {
-				n := len(Connections)
-				wRes := WeigthMsgBody{
-					Weigth: n,
+				if m.Body == nil {
+					n := len(Connections)
+					wRes := WeigthMsgBody{
+						Weigth: n,
+					}
+					if err := conn.WriteJSON(WSMessage{
+						Type: MessageTypes["weight"],
+						Body: wRes,
+					}); err != nil {
+						fmt.Println(err)
+						break
+					}
+
+					continue
 				}
-				if err := conn.WriteJSON(WSMessage{
-					Type: MessageTypes["weight"],
-					Body: wRes,
-				}); err != nil {
+				if err := conn.WriteJSON(NewErrorMessage(InvalidMsgBodyErr.Error())); err != nil {
 					fmt.Println(err)
 					break
 				}
