@@ -254,6 +254,32 @@ var InvalidMsgBodyErr = InvalidMessageBodyError{}
 
 // Tipos de errore relacionados con la base de datos
 
+type UserPayloadMissingFieldError struct {
+	InvalidField string
+}
+
+func (e UserPayloadMissingFieldError) Error() string {
+	return fmt.Sprintf("%v is required in user payload.", e.InvalidField)
+}
+
+type UserPayloadInvalidFieldLength struct {
+	InvalidField   string
+	MaxFieldLength int
+	MinFieldLength int
+}
+
+func (e UserPayloadInvalidFieldLength) Error() string {
+	return fmt.Sprintf("field %s must have a min length of %d and a max length of %d", e.InvalidField, e.MinFieldLength, e.MaxFieldLength)
+}
+
+type UsernameAlreadyTakenError struct {
+	Username string
+}
+
+func (e UsernameAlreadyTakenError) Error() string {
+	return fmt.Sprintf("value %s for Username field is already taken", e.Username)
+}
+
 type ErrorDueSavingMessage struct {
 	Message      string
 	WrappedError error
@@ -490,21 +516,40 @@ func AuthenticateUser(db *sql.DB, c LoginMsgReqBody) (int, string, error) {
 	return 0, token, nil
 }
 
-func RegisterUser(db *sql.DB, p UserPayload) error {
-	// Comprobacion basica de los campos del userpayload
+// Funcion encargada de validacion basica de campos de payload de usuario. La tabla de la base de datos ya tiene su propia validacion adicionalmente.
+func ValidateUserPayload(db *sql.DB, p UserPayload) error {
+	// Comprobacion de campos faltantes
 	if strings.Trim(p.Username, " ") == "" {
-		return fmt.Errorf("invalid username for new user")
+		return UserPayloadMissingFieldError{InvalidField: "Username"}
 	} else if strings.Trim(p.Password, " ") == "" {
-		return fmt.Errorf("invalid password for new user")
+		return UserPayloadMissingFieldError{InvalidField: "Password"}
 	} else if strings.Trim(p.Firstname, " ") == "" {
-		return fmt.Errorf("invalid firstname for new user")
+		return UserPayloadMissingFieldError{InvalidField: "Firstname"}
 	} else if strings.Trim(p.Lastname, " ") == "" {
-		return fmt.Errorf("invalid lastname for new user")
+		return UserPayloadMissingFieldError{InvalidField: "Lastname"}
 	}
 
-	_, err := GetUserByUsername(db, p.Username)
-	if err == nil {
-		return fmt.Errorf("username for new user is already taken")
+	// Comprobacion de longitud de campos
+	if len(p.Username) < 3 || len(p.Username) > 32 {
+		return UserPayloadInvalidFieldLength{InvalidField: "Username", MinFieldLength: 3, MaxFieldLength: 32}
+	} else if len(p.Password) < 8 || len(p.Password) > 255 {
+		return UserPayloadInvalidFieldLength{InvalidField: "Password", MinFieldLength: 8, MaxFieldLength: 255}
+	} else if len(p.Firstname) < 3 || len(p.Firstname) > 32 {
+		return UserPayloadInvalidFieldLength{InvalidField: "Firstname", MinFieldLength: 3, MaxFieldLength: 32}
+	} else if len(p.Lastname) < 3 || len(p.Lastname) > 32 {
+		return UserPayloadInvalidFieldLength{InvalidField: "Lastname", MinFieldLength: 3, MaxFieldLength: 32}
+	}
+
+	if _, err := GetUserByUsername(db, p.Username); err == nil {
+		return UsernameAlreadyTakenError{p.Username}
+	}
+
+	return nil
+}
+
+func RegisterUser(db *sql.DB, p UserPayload) error {
+	if err := ValidateUserPayload(db, p); err != nil {
+		return err
 	}
 
 	// Insertar nuevo usuario
